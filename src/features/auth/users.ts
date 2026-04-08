@@ -95,19 +95,15 @@ export async function registerUser(input: {
     throw new Error("Email already in use.");
   }
 
-  const existingUsers = await db.select({ id: users.id }).from(users).limit(1);
-  const role = existingUsers.length === 0 ? "admin" : "reader";
-
   const [inserted] = await db
     .insert(users)
     .values({
       email,
       name,
-      role,
+      role: "reader",
       passwordHash: hashPassword(password),
     })
     .returning();
 
   return toPublicUser(inserted);
 }
-

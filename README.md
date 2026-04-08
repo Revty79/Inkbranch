@@ -89,8 +89,7 @@ If `OLLAMA_MODEL` is missing locally, Inkbranch attempts a local installed-model
 ## Accounts
 
 You can register a new account at `/register`.
-The first account created in a fresh database is assigned `admin` so you can wire
-world/version/canon content immediately. Subsequent registrations default to `reader`.
+Registrations create `reader` accounts by default.
 
 ## Current Route Shells
 

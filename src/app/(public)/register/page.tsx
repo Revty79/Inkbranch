@@ -44,8 +44,7 @@ export default async function RegisterPage({ searchParams }: RegisterPageProps) 
           Create Your Inkbranch Account
         </h1>
         <p className="mt-2 text-sm text-[var(--ink-text-muted)]">
-          New accounts can begin Chronicles immediately. In a fresh database, the first
-          registered account becomes admin for initial setup.
+          New accounts start as reader and can begin Chronicles immediately.
         </p>
       </header>
 
