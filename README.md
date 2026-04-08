@@ -42,6 +42,19 @@ Supported local modes:
 - `INKBRANCH_AI_MODE=ollama` uses local Ollama at `OLLAMA_BASE_URL`.
 - `INKBRANCH_AI_MODE=seeded` bypasses Ollama and uses deterministic seeded narration.
 - `OLLAMA_TIMEOUT_MS` should usually be `120000-180000` for chapter-length generation on local CPU.
+- `INKBRANCH_RUNTIME_PROFILE=speed` lowers minimum generation targets and timeout floors for faster iteration.
+- `INKBRANCH_BRANCH_GENERATION_MODE=seeded_fast` skips Ollama branch-choice generation and uses deterministic fast branch packages.
+- `INKBRANCH_PROJECTION_SYNC_MODE=runtime_only` skips full structured projection rewrites on every mutation.
+
+Recommended local speed config:
+
+```bash
+INKBRANCH_RUNTIME_PROFILE=speed
+INKBRANCH_BRANCH_GENERATION_MODE=seeded_fast
+INKBRANCH_PROJECTION_SYNC_MODE=runtime_only
+OLLAMA_MODEL=phi3:mini
+OLLAMA_TIMEOUT_MS=60000
+```
 
 ## Local Startup
 
@@ -157,3 +170,5 @@ Reader and admin flows now persist through Postgres by default. Set
 - `npm run db:migrate` - apply generated Drizzle migrations
 - `npm run db:push` - push Drizzle schema to a database
 - `npm run db:push:force` - non-interactive schema push (useful in CI/agent shells)
+- `npm run story:resync` - rebuild normalized structured tables from runtime state
+- `npm run story:seed:min` - seed a minimal playable Chronicle for quick testing

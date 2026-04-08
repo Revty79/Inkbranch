@@ -700,7 +700,9 @@ async function saveDb(db: LocalStoryDb) {
   rebuildStoryChaptersFromGeneratedScenes(dbCache);
   if (env.inkbranchStorageMode === "postgres") {
     await writeRuntimeStateToPostgres(dbCache);
-    await syncStructuredTablesToPostgres(dbCache);
+    if (env.inkbranchProjectionSyncMode === "eager") {
+      await syncStructuredTablesToPostgres(dbCache);
+    }
     return;
   }
 
@@ -1591,6 +1593,115 @@ function ensureChronicleProceduralPlan(
   });
 }
 
+type RuntimeBranchDirective = "stay" | "advance" | "finale";
+
+type RuntimeBranchChoicePackage = {
+  label: string;
+  description: string;
+  intentTags: string[];
+  nextBeatTitle: string;
+  nextBeatSummary: string;
+  nextBeatAtmosphere: string | null;
+  chapterDirective: RuntimeBranchDirective;
+};
+
+type RuntimeBranchGenerationPackage = {
+  payload: {
+    chapterTitle: string;
+    continuityNotes: string[];
+    choices: RuntimeBranchChoicePackage[];
+  };
+  sourceLabel: string;
+  mode: "seeded";
+  model?: string;
+  fallbackReason?: string;
+};
+
+function createFastBranchGeneration(input: {
+  beatTitle: string;
+  beatSummary: string;
+  chapterTitle: string;
+  currentChapter: number;
+  totalChapters: number;
+  chapterReadyForAdvance: boolean;
+  recentEvents: Array<{ summary: string }>;
+}): RuntimeBranchGenerationPackage {
+  const atFinalChapter = input.currentChapter >= input.totalChapters;
+  const continuityNotes = input.recentEvents.slice(0, 3).map((event) => event.summary);
+
+  if (atFinalChapter) {
+    return {
+      payload: {
+        chapterTitle: input.chapterTitle,
+        continuityNotes,
+        choices: [
+          {
+            label: "Commit to the final confrontation",
+            description:
+              "Push this route into its decisive end and lock the perspective outcome into canon.",
+            intentTags: ["investigate", "signal", "protect"],
+            nextBeatTitle: "Final Confrontation",
+            nextBeatSummary:
+              "The route resolves through direct confrontation and irreversible consequence.",
+            nextBeatAtmosphere: "High tension and irreversible consequence",
+            chapterDirective: "finale",
+          },
+          {
+            label: "Choose a costly quiet ending",
+            description:
+              "Resolve through restraint and sacrifice while preserving canon continuity.",
+            intentTags: ["wait", "secure", "observe"],
+            nextBeatTitle: "Quiet Cost",
+            nextBeatSummary:
+              "The route closes with a costly compromise and lingering aftermath.",
+            nextBeatAtmosphere: "Somber and reflective",
+            chapterDirective: "finale",
+          },
+        ],
+      },
+      sourceLabel: "seeded_fast",
+      mode: "seeded",
+    };
+  }
+
+  const firstDirective: RuntimeBranchDirective = input.chapterReadyForAdvance
+    ? "advance"
+    : "stay";
+
+  return {
+    payload: {
+      chapterTitle: input.chapterTitle,
+      continuityNotes,
+      choices: [
+        {
+          label: "Follow the strongest lead",
+          description:
+            "Press the route thread most likely to expose the next layer of pressure.",
+          intentTags: ["investigate", "observe", "shadow"],
+          nextBeatTitle: "Pressure Lead",
+          nextBeatSummary:
+            "A focused push reveals new pressure and keeps momentum through the chapter arc.",
+          nextBeatAtmosphere: "Focused tension",
+          chapterDirective: firstDirective,
+        },
+        {
+          label: "Stabilize and gather signals",
+          description:
+            "Consolidate understanding and keep social pressure from fragmenting the route.",
+          intentTags: ["protect", "secure", "observe"],
+          nextBeatTitle: "Stabilized Front",
+          nextBeatSummary:
+            "The route steadies and deepens context before the next high-risk move.",
+          nextBeatAtmosphere: "Measured tension",
+          chapterDirective: "stay",
+        },
+      ],
+    },
+    sourceLabel: "seeded_fast",
+    mode: "seeded",
+  };
+}
+
 async function ensureProceduralChoicesForBeat(
   db: LocalStoryDb,
   input: {
@@ -1634,18 +1745,6 @@ async function ensureProceduralChoicesForBeat(
       beatId: input.beat.id,
     }) ?? null;
 
-  const canonEntries = getChronicleCanonEntriesForGeneration(db, {
-    chronicle: input.chronicle,
-  });
-  const globalState = toPublicGlobalStateForGeneration(db, input.chronicle.id);
-  const perspectiveState = groupByPerspectiveState(db, input.run.id).map((entry) => ({
-    key: entry.stateKey,
-    value: entry.stateValue,
-  }));
-  const knowledgeState = groupByPerspectiveKnowledge(db, input.run.id).map((entry) => ({
-    key: entry.flagKey,
-    status: entry.status,
-  }));
   const recentEvents = db.canonicalEventLog
     .filter((event) => event.chronicleId === input.chronicle.id)
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
@@ -1667,33 +1766,55 @@ async function ensureProceduralChoicesForBeat(
     ) ?? null;
   const chapterSceneCount = activeChapter?.sceneCount ?? 0;
   const chapterWordCount = activeChapter?.wordCount ?? 0;
-  const branchGeneration = await generateNarrativeBranch({
-    worldTitle: input.world.title,
-    worldTone: input.world.tone,
-    worldSynopsis: input.world.synopsis,
-    versionLabel: input.version.versionLabel,
-    viewpointLabel: input.viewpoint.label,
-    characterName: input.character.name,
-    characterSummary: input.character.summary,
-    beatTitle: input.beat.title,
-    beatSummary: input.beat.summary,
-    beatNarration: latestScene?.sceneText ?? input.beat.narration,
-    beatType: input.beat.beatType,
-    chapterLabel: input.beat.chapterLabel,
-    chapterNumber: currentChapter,
-    totalChapterCount: totalChapters,
-    chapterSceneCount,
-    chapterWordCount,
-    minChapterSceneCount: MIN_CHAPTER_SCENES,
-    minChapterWordCount: MIN_CHAPTER_WORDS,
-    routeSceneIndex: Math.max(1, continuityContext.routeSceneIndex),
-    canonEntries,
-    globalState,
-    perspectiveState,
-    knowledgeState,
-    recentEvents,
-    recentSceneProse: continuityContext.recentSceneProse,
-  });
+  const chapterReadyForAdvance =
+    chapterSceneCount >= MIN_CHAPTER_SCENES && chapterWordCount >= MIN_CHAPTER_WORDS;
+  const chapterTitleForCurrent = chapterTitles[currentChapter - 1] ?? `Chapter ${currentChapter}`;
+  const branchGeneration =
+    env.inkbranchBranchGenerationMode === "seeded_fast"
+      ? createFastBranchGeneration({
+          beatTitle: input.beat.title,
+          beatSummary: input.beat.summary,
+          chapterTitle: chapterTitleForCurrent,
+          currentChapter,
+          totalChapters,
+          chapterReadyForAdvance,
+          recentEvents,
+        })
+      : await generateNarrativeBranch({
+          worldTitle: input.world.title,
+          worldTone: input.world.tone,
+          worldSynopsis: input.world.synopsis,
+          versionLabel: input.version.versionLabel,
+          viewpointLabel: input.viewpoint.label,
+          characterName: input.character.name,
+          characterSummary: input.character.summary,
+          beatTitle: input.beat.title,
+          beatSummary: input.beat.summary,
+          beatNarration: latestScene?.sceneText ?? input.beat.narration,
+          beatType: input.beat.beatType,
+          chapterLabel: input.beat.chapterLabel,
+          chapterNumber: currentChapter,
+          totalChapterCount: totalChapters,
+          chapterSceneCount,
+          chapterWordCount,
+          minChapterSceneCount: MIN_CHAPTER_SCENES,
+          minChapterWordCount: MIN_CHAPTER_WORDS,
+          routeSceneIndex: Math.max(1, continuityContext.routeSceneIndex),
+          canonEntries: getChronicleCanonEntriesForGeneration(db, {
+            chronicle: input.chronicle,
+          }),
+          globalState: toPublicGlobalStateForGeneration(db, input.chronicle.id),
+          perspectiveState: groupByPerspectiveState(db, input.run.id).map((entry) => ({
+            key: entry.stateKey,
+            value: entry.stateValue,
+          })),
+          knowledgeState: groupByPerspectiveKnowledge(db, input.run.id).map((entry) => ({
+            key: entry.flagKey,
+            status: entry.status,
+          })),
+          recentEvents,
+          recentSceneProse: continuityContext.recentSceneProse,
+        });
 
   const branchChoices = branchGeneration.payload.choices;
   if (branchChoices.length < 2) {
@@ -1701,12 +1822,9 @@ async function ensureProceduralChoicesForBeat(
   }
 
   const maxBeatOrder = nextOrderIndex(db.storyBeats.map((beat) => beat.orderIndex));
-  const chapterTitleForCurrent =
-    branchGeneration.payload.chapterTitle ??
-    chapterTitles[currentChapter - 1] ??
-    `Chapter ${currentChapter}`;
+  const resolvedChapterTitle = branchGeneration.payload.chapterTitle ?? chapterTitleForCurrent;
 
-  input.beat.chapterLabel = chapterTitleForCurrent;
+  input.beat.chapterLabel = resolvedChapterTitle;
   input.beat.metadata = {
     ...input.beat.metadata,
     runtimeChapterNumber: currentChapter,
@@ -1714,8 +1832,7 @@ async function ensureProceduralChoicesForBeat(
     runtimeGeneratedChoices: true,
     runtimeChapterSceneCount: chapterSceneCount,
     runtimeChapterWordCount: chapterWordCount,
-    runtimeChapterReadyForAdvance:
-      chapterSceneCount >= MIN_CHAPTER_SCENES && chapterWordCount >= MIN_CHAPTER_WORDS,
+    runtimeChapterReadyForAdvance: chapterReadyForAdvance,
     runtimeBranchSource: branchGeneration.sourceLabel,
     runtimeBranchModel: branchGeneration.model ?? null,
     runtimeBranchFallbackReason: branchGeneration.fallbackReason ?? null,
@@ -1855,8 +1972,7 @@ async function ensureProceduralChoicesForBeat(
       chapterNumber: currentChapter,
       chapterSceneCount,
       chapterWordCount,
-      chapterReadyForAdvance:
-        chapterSceneCount >= MIN_CHAPTER_SCENES && chapterWordCount >= MIN_CHAPTER_WORDS,
+      chapterReadyForAdvance,
       totalChapters,
     },
   });

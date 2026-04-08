@@ -120,10 +120,16 @@ type BranchGenerationResult = {
   model?: string;
 };
 
-const MIN_SCENE_WORDS = 320;
-const MIN_SCENE_PARAGRAPHS = 4;
-const MIN_SCENE_TIMEOUT_MS = 120000;
-const MIN_BRANCH_TIMEOUT_MS = 120000;
+const QUALITY_MIN_SCENE_WORDS = 320;
+const SPEED_MIN_SCENE_WORDS = 160;
+const QUALITY_MIN_SCENE_PARAGRAPHS = 4;
+const SPEED_MIN_SCENE_PARAGRAPHS = 2;
+const QUALITY_MIN_SCENE_TIMEOUT_MS = 120000;
+const SPEED_MIN_SCENE_TIMEOUT_MS = 45000;
+const QUALITY_MIN_BRANCH_TIMEOUT_MS = 120000;
+const SPEED_MIN_BRANCH_TIMEOUT_MS = 45000;
+const QUALITY_MAX_SCENE_EXPANSION_PASSES = 2;
+const SPEED_MAX_SCENE_EXPANSION_PASSES = 0;
 const BRANCH_MIN_CHOICES = 2;
 const BRANCH_MAX_CHOICES = 4;
 const COMMON_BRANCH_TAGS = [
@@ -138,6 +144,37 @@ const COMMON_BRANCH_TAGS = [
   "shadow",
   "deliver",
 ];
+
+type GenerationPolicy = {
+  minSceneWords: number;
+  minSceneParagraphs: number;
+  minSceneTimeoutMs: number;
+  minBranchTimeoutMs: number;
+  maxSceneExpansionPasses: number;
+  compactContext: boolean;
+};
+
+function getGenerationPolicy(): GenerationPolicy {
+  if (env.inkbranchRuntimeProfile === "speed") {
+    return {
+      minSceneWords: SPEED_MIN_SCENE_WORDS,
+      minSceneParagraphs: SPEED_MIN_SCENE_PARAGRAPHS,
+      minSceneTimeoutMs: SPEED_MIN_SCENE_TIMEOUT_MS,
+      minBranchTimeoutMs: SPEED_MIN_BRANCH_TIMEOUT_MS,
+      maxSceneExpansionPasses: SPEED_MAX_SCENE_EXPANSION_PASSES,
+      compactContext: true,
+    };
+  }
+
+  return {
+    minSceneWords: QUALITY_MIN_SCENE_WORDS,
+    minSceneParagraphs: QUALITY_MIN_SCENE_PARAGRAPHS,
+    minSceneTimeoutMs: QUALITY_MIN_SCENE_TIMEOUT_MS,
+    minBranchTimeoutMs: QUALITY_MIN_BRANCH_TIMEOUT_MS,
+    maxSceneExpansionPasses: QUALITY_MAX_SCENE_EXPANSION_PASSES,
+    compactContext: false,
+  };
+}
 
 function stringifyValue(value: JsonValue) {
   if (typeof value === "string") {
@@ -173,8 +210,12 @@ function summarizeCanonTitles(entries: SceneCanonEntry[], limit = 5) {
     .map((entry) => `${entry.title} (${entry.entryType.replace("_", " ")})`);
 }
 
-function padSeededSceneText(sceneText: string, context: SceneGenerationContext) {
-  if (wordCount(sceneText) >= MIN_SCENE_WORDS) {
+function padSeededSceneText(
+  sceneText: string,
+  context: SceneGenerationContext,
+  minSceneWords: number,
+) {
+  if (wordCount(sceneText) >= minSceneWords) {
     return sceneText;
   }
 
@@ -199,7 +240,7 @@ function padSeededSceneText(sceneText: string, context: SceneGenerationContext) 
 
   let output = sceneText;
   for (const paragraph of narrativePadding) {
-    if (wordCount(output) >= MIN_SCENE_WORDS) {
+    if (wordCount(output) >= minSceneWords) {
       break;
     }
     output = `${output}\n\n${paragraph}`;
@@ -208,7 +249,10 @@ function padSeededSceneText(sceneText: string, context: SceneGenerationContext) 
   return output;
 }
 
-function createSeededScenePayload(context: SceneGenerationContext): GeneratedScenePayload {
+function createSeededScenePayload(
+  context: SceneGenerationContext,
+  minSceneWords: number,
+): GeneratedScenePayload {
   const visibleStateHints = summarizeStateEntries(context.globalState, 3);
   const continuityNotes = context.recentEvents.slice(0, 3).map((event) => event.summary);
   const recentSceneContinuity = summarizeSceneContinuityEntries(context.recentSceneProse, 2)
@@ -255,7 +299,7 @@ function createSeededScenePayload(context: SceneGenerationContext): GeneratedSce
 
   return {
     sceneTitle: context.beatTitle,
-    sceneText: padSeededSceneText(sceneText, context),
+    sceneText: padSeededSceneText(sceneText, context, minSceneWords),
     shortSummary: context.beatSummary,
     visibleStateHints,
     suggestedChoiceMood: null,
@@ -264,13 +308,19 @@ function createSeededScenePayload(context: SceneGenerationContext): GeneratedSce
   };
 }
 
-function buildScenePrompt(context: SceneGenerationContext) {
+function buildScenePrompt(context: SceneGenerationContext, policy: GenerationPolicy) {
+  const canonGuidelineLimit = policy.compactContext ? 6 : 10;
+  const canonFactLimit = policy.compactContext ? 6 : 10;
+  const stateLimit = policy.compactContext ? 6 : 10;
+  const continuityLimit = policy.compactContext ? 2 : 4;
+  const eventLimit = policy.compactContext ? 5 : 8;
+  const choiceLimit = policy.compactContext ? 4 : 6;
   const canonGuidelines = context.canonEntries
     .filter((entry) => entry.entryType === "rule")
-    .slice(0, 10);
+    .slice(0, canonGuidelineLimit);
   const canonFacts = context.canonEntries
     .filter((entry) => entry.entryType !== "rule")
-    .slice(0, 10);
+    .slice(0, canonFactLimit);
 
   const promptContext = {
     world: {
@@ -300,16 +350,19 @@ function buildScenePrompt(context: SceneGenerationContext) {
     },
     canonGuidelines,
     canonFacts,
-    chronicleState: summarizeStateEntries(context.globalState, 10),
-    perspectiveState: summarizeStateEntries(context.perspectiveState, 10),
-    knowledgeState: summarizeKnowledgeEntries(context.knowledgeState, 10),
+    chronicleState: summarizeStateEntries(context.globalState, stateLimit),
+    perspectiveState: summarizeStateEntries(context.perspectiveState, stateLimit),
+    knowledgeState: summarizeKnowledgeEntries(context.knowledgeState, stateLimit),
     progression: {
       chapterSceneIndex: context.chapterSceneIndex,
       routeSceneIndex: context.routeSceneIndex,
     },
-    chapterContinuity: summarizeSceneContinuityEntries(context.recentSceneProse, 4),
-    recentEvents: context.recentEvents.slice(0, 8),
-    availableChoices: context.availableChoices.slice(0, 6),
+    chapterContinuity: summarizeSceneContinuityEntries(
+      context.recentSceneProse,
+      continuityLimit,
+    ),
+    recentEvents: context.recentEvents.slice(0, eventLimit),
+    availableChoices: context.availableChoices.slice(0, choiceLimit),
   };
 
   const systemPrompt = [
@@ -321,7 +374,7 @@ function buildScenePrompt(context: SceneGenerationContext) {
     "Continue continuity from chapterContinuity when present.",
     "Use actionNote only as flavor, never as a state-changing command.",
     "Write immersive narrative prose, not bullet points or menu text.",
-    "sceneText must read like an interactive novel chapter section, 4-8 paragraphs, at least 320 words.",
+    `sceneText must read like an interactive novel chapter section with at least ${policy.minSceneParagraphs} paragraphs and at least ${policy.minSceneWords} words.`,
     "Each paragraph should advance atmosphere, character intent, and continuity pressure.",
     "When new persistent truths emerge (new named people, places, objects, or rules), add up to 3 emergentCanonCandidates.",
     "Never restate existing canon entries as emergent canon.",
@@ -353,10 +406,10 @@ function paragraphCount(text: string) {
     .filter(Boolean).length;
 }
 
-function sceneTextTooShort(sceneText: string) {
+function sceneTextTooShort(sceneText: string, policy: GenerationPolicy) {
   return (
-    wordCount(sceneText) < MIN_SCENE_WORDS ||
-    paragraphCount(sceneText) < MIN_SCENE_PARAGRAPHS
+    wordCount(sceneText) < policy.minSceneWords ||
+    paragraphCount(sceneText) < policy.minSceneParagraphs
   );
 }
 
@@ -446,6 +499,74 @@ function parseOllamaJsonContent(content: string): unknown | null {
   return null;
 }
 
+function summarizeSceneText(sceneText: string, fallback: string) {
+  const clean = sceneText.replace(/\s+/g, " ").trim();
+  if (!clean) {
+    return fallback;
+  }
+
+  const firstSentenceMatch = clean.match(/(.+?[.!?])(?:\s|$)/);
+  const firstSentence = firstSentenceMatch?.[1]?.trim() ?? "";
+  if (firstSentence.length >= 24) {
+    return firstSentence.slice(0, 220);
+  }
+
+  return clean.split(" ").slice(0, 28).join(" ").slice(0, 220);
+}
+
+function coerceLooseScenePayload(
+  input: unknown,
+  context: SceneGenerationContext,
+): GeneratedScenePayload | null {
+  if (typeof input === "string") {
+    const sceneText = readOptionalText(input);
+    if (!sceneText) {
+      return null;
+    }
+
+    return {
+      sceneTitle: context.beatTitle,
+      sceneText,
+      shortSummary: summarizeSceneText(sceneText, context.beatSummary),
+      visibleStateHints: [],
+      suggestedChoiceMood: null,
+      continuityNotes: [],
+      emergentCanonCandidates: [],
+    };
+  }
+
+  if (!input || typeof input !== "object") {
+    return null;
+  }
+
+  const candidate = input as Record<string, unknown>;
+  const sceneText =
+    readOptionalText(candidate.sceneText) ??
+    readOptionalText(candidate.text) ??
+    readOptionalText(candidate.response) ??
+    readOptionalText(candidate.content) ??
+    readOptionalText(candidate.scene) ??
+    null;
+  if (!sceneText) {
+    return null;
+  }
+
+  const summary =
+    readOptionalText(candidate.shortSummary) ??
+    readOptionalText(candidate.summary) ??
+    summarizeSceneText(sceneText, context.beatSummary);
+
+  return {
+    sceneTitle: readOptionalText(candidate.sceneTitle) ?? context.beatTitle,
+    sceneText,
+    shortSummary: summary,
+    visibleStateHints: [],
+    suggestedChoiceMood: null,
+    continuityNotes: [],
+    emergentCanonCandidates: [],
+  };
+}
+
 function coerceSceneContinuationText(input: unknown) {
   if (typeof input === "string") {
     return readOptionalText(input);
@@ -468,12 +589,17 @@ async function expandSceneTextToMinimum(
   payload: GeneratedScenePayload,
   context: SceneGenerationContext,
   timeoutMs: number,
+  policy: GenerationPolicy,
 ) {
   let sceneText = payload.sceneText.trim();
   let modelUsed: string | undefined;
 
-  for (let attempt = 0; attempt < 2 && sceneTextTooShort(sceneText); attempt += 1) {
-    const remainingWords = Math.max(120, MIN_SCENE_WORDS - wordCount(sceneText) + 80);
+  for (
+    let attempt = 0;
+    attempt < policy.maxSceneExpansionPasses && sceneTextTooShort(sceneText, policy);
+    attempt += 1
+  ) {
+    const remainingWords = Math.max(80, policy.minSceneWords - wordCount(sceneText) + 60);
     const continuationResponse = await chatJsonWithOllama({
       model: env.ollamaModel,
       timeoutMs,
@@ -517,11 +643,11 @@ async function expandSceneTextToMinimum(
     modelUsed = continuationResponse.model;
   }
 
-  if (sceneTextTooShort(sceneText)) {
-    sceneText = padSeededSceneText(sceneText, context);
+  if (sceneTextTooShort(sceneText, policy)) {
+    sceneText = padSeededSceneText(sceneText, context, policy.minSceneWords);
   }
 
-  if (sceneTextTooShort(sceneText)) {
+  if (sceneTextTooShort(sceneText, policy)) {
     const reserveParagraphs = [
       `${context.characterName} measures every gesture against what is already known in this Chronicle, refusing to treat uncertainty as an excuse for contradiction.`,
       `The moment carries forward with deliberate continuity, where each observation leaves residue that tightens motive, risk, and obligation for the next decision.`,
@@ -529,7 +655,10 @@ async function expandSceneTextToMinimum(
       `${context.viewpointLabel} remains bounded by present knowledge, so the narration stays intimate, specific, and accountable to prior events.`,
     ];
     let reserveIndex = 0;
-    while (sceneTextTooShort(sceneText) && reserveIndex < reserveParagraphs.length) {
+    while (
+      sceneTextTooShort(sceneText, policy) &&
+      reserveIndex < reserveParagraphs.length
+    ) {
       sceneText = `${sceneText}\n\n${reserveParagraphs[reserveIndex]}`.trim();
       reserveIndex += 1;
     }
@@ -730,12 +859,18 @@ function createSeededBranchPayload(
 }
 
 function buildBranchPrompt(context: BranchGenerationContext) {
+  const policy = getGenerationPolicy();
+  const canonGuidelineLimit = policy.compactContext ? 4 : 6;
+  const canonFactLimit = policy.compactContext ? 5 : 8;
+  const stateLimit = policy.compactContext ? 4 : 6;
+  const eventLimit = policy.compactContext ? 3 : 5;
+  const sceneProseLimit = policy.compactContext ? 1 : 2;
   const canonGuidelines = context.canonEntries
     .filter((entry) => entry.entryType === "rule")
-    .slice(0, 6);
+    .slice(0, canonGuidelineLimit);
   const canonFacts = context.canonEntries
     .filter((entry) => entry.entryType !== "rule")
-    .slice(0, 8);
+    .slice(0, canonFactLimit);
 
   const promptContext = {
     world: {
@@ -767,11 +902,11 @@ function buildBranchPrompt(context: BranchGenerationContext) {
     },
     canonGuidelines,
     canonFacts,
-    chronicleState: summarizeStateEntries(context.globalState, 6),
-    perspectiveState: summarizeStateEntries(context.perspectiveState, 6),
-    knowledgeState: summarizeKnowledgeEntries(context.knowledgeState, 6),
-    recentEvents: context.recentEvents.slice(0, 5),
-    recentSceneProse: summarizeSceneContinuityEntries(context.recentSceneProse, 2),
+    chronicleState: summarizeStateEntries(context.globalState, stateLimit),
+    perspectiveState: summarizeStateEntries(context.perspectiveState, stateLimit),
+    knowledgeState: summarizeKnowledgeEntries(context.knowledgeState, stateLimit),
+    recentEvents: context.recentEvents.slice(0, eventLimit),
+    recentSceneProse: summarizeSceneContinuityEntries(context.recentSceneProse, sceneProseLimit),
   };
 
   const systemPrompt = [
@@ -806,17 +941,18 @@ function branchChoicesInvalid(payload: GeneratedBranchPayload) {
 export async function generateNarrativeScene(
   context: SceneGenerationContext,
 ): Promise<SceneGenerationResult> {
-  const timeoutMs = Math.max(env.ollamaTimeoutMs, MIN_SCENE_TIMEOUT_MS);
+  const policy = getGenerationPolicy();
+  const timeoutMs = Math.max(env.ollamaTimeoutMs, policy.minSceneTimeoutMs);
   if (env.inkbranchAiMode !== "ollama") {
     return {
-      payload: createSeededScenePayload(context),
+      payload: createSeededScenePayload(context, policy.minSceneWords),
       sourceLabel: "seeded",
       mode: "seeded",
     };
   }
 
   try {
-    const { systemPrompt, userPrompt } = buildScenePrompt(context);
+    const { systemPrompt, userPrompt } = buildScenePrompt(context, policy);
     const response = await chatJsonWithOllama({
       model: env.ollamaModel,
       timeoutMs,
@@ -827,11 +963,16 @@ export async function generateNarrativeScene(
     });
 
     const parsed = parseOllamaJsonContent(response.content);
-    let payload = coerceGeneratedScenePayload(parsed);
+    let payload =
+      coerceGeneratedScenePayload(parsed) ??
+      coerceLooseScenePayload(parsed ?? response.content, context);
     if (!payload) {
       throw new Error("Ollama returned JSON that did not match scene payload shape.");
     }
-    if (sceneTextTooShort(payload.sceneText)) {
+    if (
+      env.inkbranchRuntimeProfile !== "speed" &&
+      sceneTextTooShort(payload.sceneText, policy)
+    ) {
       const retryResponse = await chatJsonWithOllama({
         model: env.ollamaModel,
         timeoutMs,
@@ -842,20 +983,30 @@ export async function generateNarrativeScene(
           {
             role: "user",
             content:
-              "sceneText is too short. Rewrite with richer chapter prose in 4-8 paragraphs and at least 320 words. Return the full JSON object only.",
+              `sceneText is too short. Rewrite with richer chapter prose using at least ${policy.minSceneParagraphs} paragraphs and at least ${policy.minSceneWords} words. Return the full JSON object only.`,
           },
         ],
       });
       const retryParsed = parseOllamaJsonContent(retryResponse.content);
-      const retryPayload = coerceGeneratedScenePayload(retryParsed);
+      const retryPayload =
+        coerceGeneratedScenePayload(retryParsed) ??
+        coerceLooseScenePayload(retryParsed ?? retryResponse.content, context);
       if (retryPayload) {
         payload = retryPayload;
       }
     }
 
     let model = response.model;
-    if (sceneTextTooShort(payload.sceneText)) {
-      const expanded = await expandSceneTextToMinimum(payload, context, timeoutMs);
+    if (
+      env.inkbranchRuntimeProfile !== "speed" &&
+      sceneTextTooShort(payload.sceneText, policy)
+    ) {
+      const expanded = await expandSceneTextToMinimum(
+        payload,
+        context,
+        timeoutMs,
+        policy,
+      );
       payload = expanded.payload;
       model = expanded.model ?? model;
     }
@@ -863,8 +1014,8 @@ export async function generateNarrativeScene(
     return {
       payload: {
         ...payload,
-        sceneText: sceneTextTooShort(payload.sceneText)
-          ? padSeededSceneText(payload.sceneText, context)
+        sceneText: sceneTextTooShort(payload.sceneText, policy)
+          ? padSeededSceneText(payload.sceneText, context, policy.minSceneWords)
           : payload.sceneText,
       },
       sourceLabel: "ollama",
@@ -877,7 +1028,7 @@ export async function generateNarrativeScene(
     console.warn("[Inkbranch AI] Falling back to seeded scene generation:", fallbackReason);
 
     return {
-      payload: createSeededScenePayload(context),
+      payload: createSeededScenePayload(context, policy.minSceneWords),
       sourceLabel: "seeded",
       mode: "seeded",
       fallbackReason,
@@ -888,7 +1039,8 @@ export async function generateNarrativeScene(
 export async function generateNarrativeBranch(
   context: BranchGenerationContext,
 ): Promise<BranchGenerationResult> {
-  const timeoutMs = Math.max(env.ollamaTimeoutMs, MIN_BRANCH_TIMEOUT_MS);
+  const policy = getGenerationPolicy();
+  const timeoutMs = Math.max(env.ollamaTimeoutMs, policy.minBranchTimeoutMs);
   const seededPayload = normalizeBranchPayload(createSeededBranchPayload(context), context);
   if (env.inkbranchAiMode !== "ollama") {
     return {
