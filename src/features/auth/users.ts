@@ -1,45 +1,113 @@
-import type { UserRecord } from "@/types/auth";
+import "server-only";
 
-const DEMO_USERS: UserRecord[] = [
-  {
-    id: "user_admin_01",
-    email: "admin@inkbranch.local",
-    name: "Inkbranch Admin",
-    role: "admin",
-    password: "inkbranch-admin",
-  },
-  {
-    id: "user_reader_01",
-    email: "reader@inkbranch.local",
-    name: "Inkbranch Reader",
-    role: "reader",
-    password: "inkbranch-reader",
-  },
-  {
-    id: "user_creator_01",
-    email: "creator@inkbranch.local",
-    name: "Future Creator",
-    role: "creator",
-    password: "inkbranch-creator",
-  },
-];
+import { users } from "@/db/schema";
+import { db } from "@/lib/db/server";
+import type { UserPublicRecord } from "@/types/auth";
+import { eq } from "drizzle-orm";
+import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 
-export function listDemoUsers() {
-  return DEMO_USERS;
+const PASSWORD_HASH_KEYLEN = 64;
+
+function normalizeEmail(email: string) {
+  return email.trim().toLowerCase();
 }
 
-export function findUserById(userId: string) {
-  return DEMO_USERS.find((user) => user.id === userId) ?? null;
+function hashPassword(password: string, salt = randomBytes(16).toString("hex")) {
+  const hash = scryptSync(password, salt, PASSWORD_HASH_KEYLEN).toString("hex");
+  return `${salt}:${hash}`;
 }
 
-export function authenticateDemoUser(email: string, password: string) {
-  const user = DEMO_USERS.find(
-    (entry) => entry.email.toLowerCase() === email.toLowerCase().trim(),
-  );
+function verifyPassword(password: string, storedHash: string) {
+  const [salt, hash] = storedHash.split(":");
+  if (!salt || !hash) {
+    return false;
+  }
 
-  if (!user || user.password !== password) {
+  const derivedHash = scryptSync(password, salt, PASSWORD_HASH_KEYLEN).toString("hex");
+  const expected = Buffer.from(hash, "hex");
+  const actual = Buffer.from(derivedHash, "hex");
+  if (expected.length !== actual.length) {
+    return false;
+  }
+
+  return timingSafeEqual(expected, actual);
+}
+
+function toPublicUser(row: typeof users.$inferSelect): UserPublicRecord {
+  return {
+    id: row.id,
+    email: row.email,
+    name: row.name,
+    role: row.role,
+  };
+}
+
+export async function listBootstrapUsers() {
+  return [] as Array<{ email: string; role: string; password: string }>;
+}
+
+export async function findUserById(userId: string) {
+  const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
+  return user ? toPublicUser(user) : null;
+}
+
+export async function authenticateUser(emailInput: string, password: string) {
+  const email = normalizeEmail(emailInput);
+  const [user] = await db.select().from(users).where(eq(users.email, email)).limit(1);
+  if (!user) {
     return null;
   }
 
-  return user;
+  if (!verifyPassword(password, user.passwordHash)) {
+    return null;
+  }
+
+  return toPublicUser(user);
 }
+
+export async function registerUser(input: {
+  name: string;
+  email: string;
+  password: string;
+}) {
+  const name = input.name.trim();
+  const email = normalizeEmail(input.email);
+  const password = input.password;
+
+  if (name.length < 2) {
+    throw new Error("Name must be at least 2 characters.");
+  }
+
+  if (!email.includes("@") || email.length < 5) {
+    throw new Error("Please provide a valid email address.");
+  }
+
+  if (password.length < 8) {
+    throw new Error("Password must be at least 8 characters.");
+  }
+
+  const [existing] = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(eq(users.email, email))
+    .limit(1);
+  if (existing) {
+    throw new Error("Email already in use.");
+  }
+
+  const existingUsers = await db.select({ id: users.id }).from(users).limit(1);
+  const role = existingUsers.length === 0 ? "admin" : "reader";
+
+  const [inserted] = await db
+    .insert(users)
+    .values({
+      email,
+      name,
+      role,
+      passwordHash: hashPassword(password),
+    })
+    .returning();
+
+  return toPublicUser(inserted);
+}
+

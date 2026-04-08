@@ -18,7 +18,7 @@ export async function getCurrentUser() {
     return null;
   }
 
-  const user = findUserById(session.userId);
+  const user = await findUserById(session.userId);
   if (!user) {
     return null;
   }

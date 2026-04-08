@@ -1,8 +1,16 @@
 import "server-only";
 
-import { createDefaultStorySeed } from "@/features/story/default-seed";
+import { generateNarrativeScene } from "@/features/story/scene-generator";
+import { storyRuntimeState } from "@/db/schema";
+import {
+  scenePayloadToMetadata,
+  type GeneratedScenePayload,
+} from "@/lib/ai/types";
+import { db as postgresDb } from "@/lib/db/server";
+import { env } from "@/lib/env";
 import type {
   BeatChoiceRecord,
+  CanonEntryType,
   ChoiceCondition,
   ChoiceConsequence,
   ChronicleRecord,
@@ -16,13 +24,17 @@ import type {
   ReaderWorldCard,
   StoryBeatRecord,
 } from "@/types/story";
+import { eq } from "drizzle-orm";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 
 const DATA_DIRECTORY = path.join(process.cwd(), "data");
 const DB_FILE = path.join(DATA_DIRECTORY, "inkbranch.local.json");
+const STORY_RUNTIME_KEY = "primary";
 const GUIDED_ACTION_TEXT_LIMIT = 180;
+const MAX_EMERGENT_CANON_PER_SCENE = 3;
+const MIN_EMERGENT_CANON_BODY_LENGTH = 32;
 
 const ACTION_TAG_HINTS: Record<string, string[]> = {
   investigate: ["investigate", "inspect", "search", "question", "probe", "clue"],
@@ -107,6 +119,25 @@ function normalizeDbShape(db: LocalStoryDb): LocalStoryDb {
   };
 }
 
+function createEmptyStoryDb(): LocalStoryDb {
+  return {
+    storyWorlds: [],
+    storyVersions: [],
+    storyCharacters: [],
+    playableViewpoints: [],
+    storyCanonEntries: [],
+    storyBeats: [],
+    beatChoices: [],
+    chronicles: [],
+    chronicleWorldStateValues: [],
+    perspectiveRuns: [],
+    perspectiveStateValues: [],
+    perspectiveKnowledgeFlags: [],
+    generatedScenes: [],
+    canonicalEventLog: [],
+  };
+}
+
 async function readDbFile() {
   try {
     const raw = await readFile(DB_FILE, "utf8");
@@ -121,9 +152,55 @@ async function writeDbFile(db: LocalStoryDb) {
   await writeFile(DB_FILE, JSON.stringify(db, null, 2), "utf8");
 }
 
+async function readRuntimeStateFromPostgres() {
+  const rows = await postgresDb
+    .select({ payload: storyRuntimeState.payload })
+    .from(storyRuntimeState)
+    .where(eq(storyRuntimeState.key, STORY_RUNTIME_KEY))
+    .limit(1);
+  const payload = rows[0]?.payload;
+
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+
+  return payload as unknown as LocalStoryDb;
+}
+
+async function writeRuntimeStateToPostgres(db: LocalStoryDb) {
+  await postgresDb
+    .insert(storyRuntimeState)
+    .values({
+      key: STORY_RUNTIME_KEY,
+      payload: db as unknown as Record<string, unknown>,
+      updatedAt: new Date(),
+    })
+    .onConflictDoUpdate({
+      target: storyRuntimeState.key,
+      set: {
+        payload: db as unknown as Record<string, unknown>,
+        updatedAt: new Date(),
+      },
+    });
+}
+
 async function ensureDbLoaded() {
   if (dbCache) {
     return structuredClone(dbCache);
+  }
+
+  if (env.inkbranchStorageMode === "postgres") {
+    const fromPostgres = await readRuntimeStateFromPostgres();
+    if (fromPostgres) {
+      const normalized = normalizeDbShape(fromPostgres);
+      dbCache = normalized;
+      return structuredClone(dbCache);
+    }
+
+    const empty = normalizeDbShape(createEmptyStoryDb());
+    dbCache = empty;
+    await writeRuntimeStateToPostgres(empty);
+    return structuredClone(empty);
   }
 
   const fromDisk = await readDbFile();
@@ -136,14 +213,19 @@ async function ensureDbLoaded() {
     return structuredClone(dbCache);
   }
 
-  const seeded = normalizeDbShape(createDefaultStorySeed());
-  dbCache = seeded;
-  await writeDbFile(seeded);
-  return structuredClone(seeded);
+  const empty = normalizeDbShape(createEmptyStoryDb());
+  dbCache = empty;
+  await writeDbFile(empty);
+  return structuredClone(empty);
 }
 
 async function saveDb(db: LocalStoryDb) {
   dbCache = structuredClone(db);
+  if (env.inkbranchStorageMode === "postgres") {
+    await writeRuntimeStateToPostgres(dbCache);
+    return;
+  }
+
   await writeDbFile(dbCache);
 }
 
@@ -374,35 +456,317 @@ function addCanonicalEvent(
   });
 }
 
-function addGeneratedScene(
+function normalizeActionNote(note: string | null | undefined) {
+  if (typeof note !== "string") {
+    return null;
+  }
+
+  const trimmed = note.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  return trimmed.slice(0, GUIDED_ACTION_TEXT_LIMIT);
+}
+
+function readMetadataString(metadata: Record<string, JsonValue>, key: string) {
+  const value = metadata[key];
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+function slugifyCanonKey(value: string) {
+  const slug = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return slug || "canon_entry";
+}
+
+function canonPrefixForType(entryType: CanonEntryType) {
+  if (entryType === "character_truth") return "char";
+  if (entryType === "place_truth") return "place";
+  if (entryType === "item_truth") return "item";
+  if (entryType === "rule") return "rule";
+  return "world";
+}
+
+function ensureUniqueCanonKey(
+  db: LocalStoryDb,
+  versionId: string,
+  keyHint: string,
+  entryType: CanonEntryType,
+) {
+  const normalizedHint = slugifyCanonKey(keyHint);
+  const prefix = canonPrefixForType(entryType);
+  const baseKey = normalizedHint.startsWith(`${prefix}_`)
+    ? normalizedHint
+    : `${prefix}_${normalizedHint}`;
+
+  let candidate = baseKey;
+  let suffix = 2;
+  while (
+    db.storyCanonEntries.some(
+      (entry) => entry.versionId === versionId && entry.canonKey === candidate,
+    )
+  ) {
+    candidate = `${baseKey}_${suffix}`;
+    suffix += 1;
+  }
+
+  return candidate;
+}
+
+function lockEmergentCanonCandidates(
   db: LocalStoryDb,
   input: {
-    chronicleId: string;
-    runId: string;
+    chronicle: ChronicleRecord;
+    run: PerspectiveRunRecord;
     beat: StoryBeatRecord;
-    viewpointLabel: string;
+    sceneId: string;
+    resolutionSource: "run_start" | "explicit_choice" | "guided_action";
+    selectedChoiceLabel?: string | null;
+    payload: GeneratedScenePayload;
+    sourceLabel: string;
+    model?: string;
+    fallbackReason?: string;
   },
 ) {
-  const headerParts = [
-    input.beat.chapterLabel ? `${input.beat.chapterLabel}` : null,
-    input.beat.title,
-    input.beat.sceneSubtitle ? `(${input.beat.sceneSubtitle})` : null,
-  ].filter((part): part is string => Boolean(part));
+  const candidates = input.payload.emergentCanonCandidates ?? [];
+  if (!candidates.length) {
+    return 0;
+  }
 
-  const sceneText = `${headerParts.join(" - ")}\n\n${input.beat.narration}\n\nPerspective: ${
-    input.viewpointLabel
-  }.`;
+  const versionId = input.chronicle.versionId;
+  const seenTitles = new Set(
+    db.storyCanonEntries
+      .filter((entry) => {
+        if (entry.versionId !== versionId) {
+          return false;
+        }
 
-  db.generatedScenes.push({
-    id: createId("scene"),
-    chronicleId: input.chronicleId,
-    perspectiveRunId: input.runId,
+        const origin = readMetadataString(entry.metadata, "origin");
+        if (origin !== "ai_emergent_locked") {
+          return true;
+        }
+
+        return (
+          readMetadataString(entry.metadata, "sourceChronicleId") === input.chronicle.id
+        );
+      })
+      .map((entry) => `${entry.entryType}|${entry.title.trim().toLowerCase()}`),
+  );
+  let lockedCount = 0;
+
+  for (const candidate of candidates) {
+    if (lockedCount >= MAX_EMERGENT_CANON_PER_SCENE) {
+      break;
+    }
+    if (candidate.confidence === "low") {
+      continue;
+    }
+
+    const title = candidate.title.trim().slice(0, 140);
+    const body = candidate.body.trim().slice(0, 700);
+    if (title.length < 3 || body.length < MIN_EMERGENT_CANON_BODY_LENGTH) {
+      continue;
+    }
+
+    const dedupeKey = `${candidate.entryType}|${title.toLowerCase()}`;
+    if (seenTitles.has(dedupeKey)) {
+      continue;
+    }
+
+    const canonKey = ensureUniqueCanonKey(
+      db,
+      versionId,
+      candidate.canonKey ?? title,
+      candidate.entryType,
+    );
+    const entry = {
+      id: createId("canon"),
+      versionId,
+      entryType: candidate.entryType,
+      canonKey,
+      title,
+      body,
+      isContradictionSensitive: true,
+      metadata: {
+        origin: "ai_emergent_locked",
+        sourceLabel: input.sourceLabel,
+        sourceSceneId: input.sceneId,
+        sourceBeatId: input.beat.id,
+        sourceRunId: input.run.id,
+        sourceChronicleId: input.chronicle.id,
+        confidence: candidate.confidence ?? "medium",
+        selectedChoiceLabel: input.selectedChoiceLabel ?? null,
+        resolutionSource: input.resolutionSource,
+        model: input.model ?? null,
+        fallbackReason: input.fallbackReason ?? null,
+      },
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    };
+    db.storyCanonEntries.push(entry);
+    seenTitles.add(dedupeKey);
+    lockedCount += 1;
+
+    addCanonicalEvent(db, {
+      chronicleId: input.chronicle.id,
+      perspectiveRunId: input.run.id,
+      beatId: input.beat.id,
+      eventType: "world_change",
+      summary: `Canon locked from scene: ${entry.title}.`,
+      payload: {
+        canonEntryId: entry.id,
+        canonKey: entry.canonKey,
+        entryType: entry.entryType,
+        sourceSceneId: input.sceneId,
+        origin: "ai_emergent_locked",
+      },
+    });
+  }
+
+  return lockedCount;
+}
+
+async function addGeneratedScene(
+  db: LocalStoryDb,
+  input: {
+    chronicle: ChronicleRecord;
+    run: PerspectiveRunRecord;
+    worldTitle: string;
+    worldTone: string;
+    worldSynopsis: string;
+    versionLabel: string;
+    characterName: string;
+    characterSummary: string;
+    beat: StoryBeatRecord;
+    viewpointLabel: string;
+    selectedChoiceLabel?: string | null;
+    actionNote?: string | null;
+    resolutionSource: "run_start" | "explicit_choice" | "guided_action";
+  },
+) {
+  const canonEntries = db.storyCanonEntries
+    .filter((entry) => {
+      if (entry.versionId !== input.chronicle.versionId) {
+        return false;
+      }
+
+      const origin = readMetadataString(entry.metadata, "origin");
+      if (origin !== "ai_emergent_locked") {
+        return true;
+      }
+
+      return (
+        readMetadataString(entry.metadata, "sourceChronicleId") === input.chronicle.id
+      );
+    })
+    .sort((a, b) => a.title.localeCompare(b.title))
+    .map((entry) => ({
+      canonKey: entry.canonKey,
+      entryType: entry.entryType,
+      title: entry.title,
+      body: entry.body,
+    }));
+  const globalState = groupByChronicleStates(db, input.chronicle.id).map((entry) => ({
+    key: entry.stateKey,
+    value: entry.stateValue,
+  }));
+  const perspectiveState = groupByPerspectiveState(db, input.run.id).map((entry) => ({
+    key: entry.stateKey,
+    value: entry.stateValue,
+  }));
+  const knowledgeState = groupByPerspectiveKnowledge(db, input.run.id).map((entry) => ({
+    key: entry.flagKey,
+    status: entry.status,
+  }));
+  const recentEvents = db.canonicalEventLog
+    .filter((event) => event.chronicleId === input.chronicle.id)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    .slice(0, 8)
+    .map((event) => ({
+      eventType: event.eventType,
+      summary: event.summary,
+    }));
+  const availableChoices = listAvailableChoicesForBeat(db, {
     beatId: input.beat.id,
-    sceneText,
-    sourceLabel: "seeded",
-    metadata: {},
-    createdAt: nowIso(),
+    chronicleId: input.chronicle.id,
+    runId: input.run.id,
+  }).map((choice) => ({
+    label: choice.label,
+    description: choice.description,
+  }));
+
+  const generation = await generateNarrativeScene({
+    worldTitle: input.worldTitle,
+    worldTone: input.worldTone,
+    worldSynopsis: input.worldSynopsis,
+    versionLabel: input.versionLabel,
+    viewpointLabel: input.viewpointLabel,
+    characterName: input.characterName,
+    characterSummary: input.characterSummary,
+    beatTitle: input.beat.title,
+    beatSubtitle: input.beat.sceneSubtitle,
+    beatSummary: input.beat.summary,
+    beatNarration: input.beat.narration,
+    beatAtmosphere: input.beat.atmosphere,
+    beatType: input.beat.beatType,
+    chapterLabel: input.beat.chapterLabel,
+    selectedChoiceLabel: input.selectedChoiceLabel ?? null,
+    actionNote: normalizeActionNote(input.actionNote),
+    resolutionSource: input.resolutionSource,
+    canonEntries,
+    globalState,
+    perspectiveState,
+    knowledgeState,
+    recentEvents,
+    availableChoices,
   });
+
+  const sceneMetadata: Record<string, JsonValue> = {
+    ...scenePayloadToMetadata(generation.payload),
+    generationMode: generation.mode,
+    model: generation.model ?? null,
+    fallbackReason: generation.fallbackReason ?? null,
+    selectedChoiceLabel: input.selectedChoiceLabel ?? null,
+    actionNote: normalizeActionNote(input.actionNote),
+    resolutionSource: input.resolutionSource,
+    beatType: input.beat.beatType,
+    chapterLabel: input.beat.chapterLabel,
+  };
+
+  const sceneRecord = {
+    id: createId("scene"),
+    chronicleId: input.chronicle.id,
+    perspectiveRunId: input.run.id,
+    beatId: input.beat.id,
+    sceneText: generation.payload.sceneText,
+    sourceLabel: generation.sourceLabel,
+    metadata: sceneMetadata,
+    createdAt: nowIso(),
+  };
+  db.generatedScenes.push(sceneRecord);
+
+  const lockedCanonCount = lockEmergentCanonCandidates(db, {
+    chronicle: input.chronicle,
+    run: input.run,
+    beat: input.beat,
+    sceneId: sceneRecord.id,
+    resolutionSource: input.resolutionSource,
+    selectedChoiceLabel: input.selectedChoiceLabel,
+    payload: generation.payload,
+    sourceLabel: generation.sourceLabel,
+    model: generation.model,
+    fallbackReason: generation.fallbackReason,
+  });
+  sceneMetadata.lockedCanonCount = lockedCanonCount;
 }
 
 function listAvailableChoicesForBeat(
@@ -425,16 +789,20 @@ function listAvailableChoicesForBeat(
     );
 }
 
-function applyChoiceTransition(
+async function applyChoiceTransition(
   db: LocalStoryDb,
   input: {
     chronicle: ChronicleRecord;
     run: PerspectiveRunRecord;
     viewpoint: { id: string; label: string };
+    world: { title: string; tone: string; synopsis: string };
+    version: { versionLabel: string };
+    character: { name: string; summary: string };
     currentBeat: StoryBeatRecord;
     choice: BeatChoiceRecord;
     resolutionSource: "explicit_choice" | "guided_action";
     guidedActionText?: string;
+    actionNote?: string | null;
   },
 ) {
   for (const consequence of input.choice.consequences) {
@@ -493,14 +861,25 @@ function applyChoiceTransition(
       toBeatId: nextBeat.id,
       resolutionSource: input.resolutionSource,
       guidedActionText: input.guidedActionText ?? null,
+      actionNote: normalizeActionNote(input.actionNote),
     },
   });
 
-  addGeneratedScene(db, {
-    chronicleId: input.chronicle.id,
-    runId: input.run.id,
+  await addGeneratedScene(db, {
+    chronicle: input.chronicle,
+    run: input.run,
+    worldTitle: input.world.title,
+    worldTone: input.world.tone,
+    worldSynopsis: input.world.synopsis,
+    versionLabel: input.version.versionLabel,
+    characterName: input.character.name,
+    characterSummary: input.character.summary,
     beat: nextBeat,
     viewpointLabel: input.viewpoint.label,
+    selectedChoiceLabel: input.choice.label,
+    actionNote: input.actionNote ?? input.guidedActionText ?? null,
+    resolutionSource:
+      input.resolutionSource === "guided_action" ? "guided_action" : "explicit_choice",
   });
 
   return {
@@ -798,9 +1177,15 @@ export async function createPerspectiveRunForUser(input: {
   chronicleId: string;
   viewpointId: string;
 }) {
-  return withDbMutation((db) => {
+  return withDbMutation(async (db) => {
     const chronicle = assertChronicleForUser(db, input.chronicleId, input.userId);
     const viewpoint = assertViewpointExists(db, input.viewpointId);
+    const world = assertWorldExists(db, chronicle.worldId);
+    const version = assertVersionExists(db, chronicle.versionId);
+    const character = db.storyCharacters.find((entry) => entry.id === viewpoint.characterId);
+    if (!character) {
+      throw new Error("Perspective character not found.");
+    }
     if (viewpoint.versionId !== chronicle.versionId) {
       throw new Error("Selected viewpoint does not belong to this Chronicle version.");
     }
@@ -839,11 +1224,18 @@ export async function createPerspectiveRunForUser(input: {
 
     upsertPerspectiveState(db, run.id, "viewpoint_label", viewpoint.label);
 
-    addGeneratedScene(db, {
-      chronicleId: chronicle.id,
-      runId: run.id,
+    await addGeneratedScene(db, {
+      chronicle,
+      run,
+      worldTitle: world.title,
+      worldTone: world.tone,
+      worldSynopsis: world.synopsis,
+      versionLabel: version.versionLabel,
+      characterName: character.name,
+      characterSummary: character.summary,
       beat: startBeat,
       viewpointLabel: viewpoint.label,
+      resolutionSource: "run_start",
     });
 
     addCanonicalEvent(db, {
@@ -940,12 +1332,18 @@ export async function applyChoiceForUser(input: {
   chronicleId: string;
   runId: string;
   choiceId: string;
+  actionNote?: string;
 }) {
-  return withDbMutation((db) => {
+  return withDbMutation(async (db) => {
     const { chronicle, run } = assertPerspectiveRunForUser(db, input);
     const viewpoint = assertViewpointExists(db, run.viewpointId);
+    const world = assertWorldExists(db, chronicle.worldId);
+    const version = assertVersionExists(db, chronicle.versionId);
+    const character = db.storyCharacters.find((entry) => entry.id === viewpoint.characterId);
+    if (!character) {
+      throw new Error("Perspective character not found.");
+    }
     const currentBeat = assertBeatExists(db, run.currentBeatId);
-    assertVersionExists(db, chronicle.versionId);
 
     const choice = db.beatChoices.find(
       (entry) => entry.id === input.choiceId && entry.beatId === currentBeat.id,
@@ -963,13 +1361,17 @@ export async function applyChoiceForUser(input: {
       throw new Error("Choice is currently gated by story state.");
     }
 
-    const result = applyChoiceTransition(db, {
+    const result = await applyChoiceTransition(db, {
       chronicle,
       run,
       viewpoint,
+      world,
+      version,
+      character,
       currentBeat,
       choice,
       resolutionSource: "explicit_choice",
+      actionNote: normalizeActionNote(input.actionNote),
     });
 
     return {
@@ -989,11 +1391,16 @@ export async function applyGuidedActionForUser(input: {
   runId: string;
   actionText: string;
 }) {
-  return withDbMutation((db) => {
+  return withDbMutation(async (db) => {
     const { chronicle, run } = assertPerspectiveRunForUser(db, input);
     const viewpoint = assertViewpointExists(db, run.viewpointId);
+    const world = assertWorldExists(db, chronicle.worldId);
+    const version = assertVersionExists(db, chronicle.versionId);
+    const character = db.storyCharacters.find((entry) => entry.id === viewpoint.characterId);
+    if (!character) {
+      throw new Error("Perspective character not found.");
+    }
     const currentBeat = assertBeatExists(db, run.currentBeatId);
-    assertVersionExists(db, chronicle.versionId);
 
     if (!currentBeat.allowsGuidedAction) {
       throw new Error("Guided actions are not enabled for this scene.");
@@ -1048,10 +1455,13 @@ export async function applyGuidedActionForUser(input: {
       };
     }
 
-    const result = applyChoiceTransition(db, {
+    const result = await applyChoiceTransition(db, {
       chronicle,
       run,
       viewpoint,
+      world,
+      version,
+      character,
       currentBeat,
       choice: mappedChoice,
       resolutionSource: "guided_action",

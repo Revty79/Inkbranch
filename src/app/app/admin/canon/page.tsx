@@ -4,6 +4,16 @@ import { StudioSection } from "@/components/admin/studio-section";
 import { createCanonEntryAction } from "@/features/admin/actions";
 import { listAdminStoryData } from "@/features/story/repository";
 
+function readMetadataString(metadata: Record<string, unknown>, key: string) {
+  const value = metadata[key];
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
 export default async function AdminCanonPage() {
   const data = await listAdminStoryData();
 
@@ -17,12 +27,16 @@ export default async function AdminCanonPage() {
     >
       <GuideCallout title="How To Think About Canon">
         <p>
-          Canon entries are the rules your story logic should not violate.
-          Treat canon as persistent source-of-truth, not optional notes.
+          Canon entries are persistent story truth, not optional notes. Start by
+          writing foundational canon and rules here first.
         </p>
         <p>
           Use stable canon keys so downstream tooling can reference entries
           reliably.
+        </p>
+        <p>
+          Generated scenes can now lock emergent canon (new people, places,
+          items, or rules) into this same list when confidence is high enough.
         </p>
       </GuideCallout>
 
@@ -94,7 +108,19 @@ export default async function AdminCanonPage() {
       <div className="grid gap-3 md:grid-cols-2">
         {data.storyCanonEntries.map((entry) => (
           <div key={entry.id} className="ink-panel p-3">
-            <p className="ink-label">{entry.entryType}</p>
+            <div className="flex flex-wrap items-center gap-2">
+              <p className="ink-label">{entry.entryType}</p>
+              <span className="ink-pill">
+                {readMetadataString(entry.metadata, "origin") === "ai_emergent_locked"
+                  ? "AI locked canon"
+                  : "Foundational canon"}
+              </span>
+              {readMetadataString(entry.metadata, "sourceLabel") ? (
+                <span className="ink-pill">
+                  source: {readMetadataString(entry.metadata, "sourceLabel")}
+                </span>
+              ) : null}
+            </div>
             <p className="mt-1 font-sans text-lg font-semibold text-[var(--ink-text)]">
               {entry.title}
             </p>
@@ -102,6 +128,11 @@ export default async function AdminCanonPage() {
               key: {entry.canonKey}
             </p>
             <p className="mt-2 text-sm text-[var(--ink-text-muted)]">{entry.body}</p>
+            {readMetadataString(entry.metadata, "sourceSceneId") ? (
+              <p className="mt-2 text-xs text-[var(--ink-text-soft)]">
+                locked from scene: {readMetadataString(entry.metadata, "sourceSceneId")}
+              </p>
+            ) : null}
           </div>
         ))}
       </div>

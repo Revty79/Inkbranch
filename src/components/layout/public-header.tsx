@@ -57,9 +57,14 @@ export async function PublicHeader() {
             </form>
           </div>
         ) : (
-          <Link href="/sign-in" className="ink-btn ink-btn-primary">
-            Sign In
-          </Link>
+          <div className="flex items-center gap-2">
+            <Link href="/register" className="ink-btn ink-btn-secondary">
+              Register
+            </Link>
+            <Link href="/sign-in" className="ink-btn ink-btn-primary">
+              Sign In
+            </Link>
+          </div>
         )}
       </div>
     </header>

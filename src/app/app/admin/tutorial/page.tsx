@@ -42,9 +42,10 @@ const concepts: Concept[] = [
   },
   {
     name: "Canon Entry",
-    what: "A truth or rule that should hold across scenes and routes.",
-    why: "Prevents continuity drift and keeps generated/branching output coherent.",
-    example: "north_gate_protocol: ward bell seals the north gate.",
+    what: "A truth or rule that should hold across scenes and routes. Canon can be foundational (authored) or emergent (AI-locked from play).",
+    why: "Prevents continuity drift and keeps generated/branching output coherent while allowing the world to grow safely.",
+    example:
+      "Foundational: north_gate_protocol. Emergent: char_riven_holt (locked after first appearance).",
   },
   {
     name: "Scene (Beat)",
@@ -99,7 +100,7 @@ const workflow = [
     step: "4",
     title: "Write Canon",
     details:
-      "Capture core truths and rules that should constrain story behavior.",
+      "Capture core truths and rules first. During play, new high-confidence scene facts can be auto-locked into canon.",
     href: "/app/admin/canon",
   },
   {

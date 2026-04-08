@@ -1,4 +1,4 @@
-import { authenticateUser } from "@/features/auth/users";
+import { registerUser } from "@/features/auth/users";
 import {
   SESSION_COOKIE_NAME,
   createSessionToken,
@@ -16,13 +16,29 @@ function getSafeRedirectTarget(candidate: string | null) {
 
 export async function POST(request: Request) {
   const formData = await request.formData();
+  const name = String(formData.get("name") ?? "");
   const email = String(formData.get("email") ?? "");
   const password = String(formData.get("password") ?? "");
+  const confirmPassword = String(formData.get("confirmPassword") ?? "");
   const nextCandidate = String(formData.get("next") ?? "");
 
-  const user = await authenticateUser(email, password);
-  if (!user) {
-    const redirectUrl = new URL("/sign-in?error=invalid_credentials", request.url);
+  if (password !== confirmPassword) {
+    const redirectUrl = new URL("/register?error=password_mismatch", request.url);
+    return NextResponse.redirect(redirectUrl);
+  }
+
+  let user;
+  try {
+    user = await registerUser({ name, email, password });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Registration failed.";
+    const errorCode =
+      message === "Email already in use."
+        ? "email_taken"
+        : message === "Password must be at least 8 characters."
+          ? "password_short"
+          : "invalid_input";
+    const redirectUrl = new URL(`/register?error=${errorCode}`, request.url);
     return NextResponse.redirect(redirectUrl);
   }
 
@@ -36,6 +52,6 @@ export async function POST(request: Request) {
   const target = getSafeRedirectTarget(nextCandidate);
   const response = NextResponse.redirect(new URL(target, request.url));
   response.cookies.set(SESSION_COOKIE_NAME, token, getSessionCookieOptions());
-
   return response;
 }
+

@@ -63,6 +63,7 @@ export const users = pgTable("users", {
   email: text("email").notNull().unique(),
   name: text("name").notNull(),
   role: userRoleEnum("role").notNull().default("reader"),
+  passwordHash: text("password_hash").notNull().default(""),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
@@ -392,6 +393,13 @@ export const generatedScenes = pgTable(
   (table) => [index("generated_scenes_run_idx").on(table.perspectiveRunId)],
 );
 
+export const storyRuntimeState = pgTable("story_runtime_state", {
+  key: text("key").primaryKey(),
+  payload: jsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
 export const storyWorldRelations = relations(storyWorlds, ({ many }) => ({
   versions: many(storyVersions),
   characters: many(storyCharacters),
@@ -459,6 +467,7 @@ export type PerspectiveKnowledgeFlag = InferSelectModel<
 >;
 export type GeneratedScene = InferSelectModel<typeof generatedScenes>;
 export type CanonicalEvent = InferSelectModel<typeof canonicalEventLog>;
+export type StoryRuntimeState = InferSelectModel<typeof storyRuntimeState>;
 
 export type NewStoryWorld = InferInsertModel<typeof storyWorlds>;
 export type NewStoryVersion = InferInsertModel<typeof storyVersions>;
@@ -469,3 +478,4 @@ export type NewStoryBeat = InferInsertModel<typeof storyBeats>;
 export type NewBeatChoice = InferInsertModel<typeof beatChoices>;
 export type NewChronicle = InferInsertModel<typeof chronicles>;
 export type NewPerspectiveRun = InferInsertModel<typeof perspectiveRuns>;
+export type NewStoryRuntimeState = InferInsertModel<typeof storyRuntimeState>;

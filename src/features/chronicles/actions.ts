@@ -53,12 +53,18 @@ export async function chooseBeatChoiceAction(formData: FormData) {
   const chronicleId = mustBeString(formData.get("chronicleId"), "chronicleId");
   const runId = mustBeString(formData.get("runId"), "runId");
   const choiceId = mustBeString(formData.get("choiceId"), "choiceId");
+  const actionNoteEntry = formData.get("actionNote");
+  const actionNote =
+    typeof actionNoteEntry === "string" && actionNoteEntry.trim()
+      ? actionNoteEntry.trim()
+      : undefined;
 
   const result = await applyChoiceForUser({
     userId: user.id,
     chronicleId,
     runId,
     choiceId,
+    actionNote,
   });
 
   revalidatePath(`/app/chronicles/${chronicleId}/runs/${runId}`);

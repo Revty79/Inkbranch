@@ -1,5 +1,6 @@
-import { listDemoUsers } from "@/features/auth/users";
+import { listBootstrapUsers } from "@/features/auth/users";
 import { getCurrentUser } from "@/lib/auth/server";
+import Link from "next/link";
 import { redirect } from "next/navigation";
 
 type SignInPageProps = {
@@ -17,8 +18,8 @@ export default async function SignInPage({ searchParams }: SignInPageProps) {
     typeof params.next === "string" && params.next.startsWith("/")
       ? params.next
       : "/app";
-
   const hasError = params.error === "invalid_credentials";
+  const bootstrapUsers = await listBootstrapUsers();
 
   return (
     <div className="mx-auto w-full max-w-xl space-y-5">
@@ -28,8 +29,7 @@ export default async function SignInPage({ searchParams }: SignInPageProps) {
           Sign In To Inkbranch
         </h1>
         <p className="mt-2 text-sm text-[var(--ink-text-muted)]">
-          Use one of the internal demo identities while the platform remains
-          Phase 02 internal-authored.
+          Use your account credentials to continue your Chronicles.
         </p>
       </header>
 
@@ -44,7 +44,7 @@ export default async function SignInPage({ searchParams }: SignInPageProps) {
             name="email"
             type="email"
             className="ink-field"
-            placeholder="reader@inkbranch.local"
+            placeholder="you@example.com"
           />
         </label>
         <label className="block space-y-1.5">
@@ -67,23 +67,36 @@ export default async function SignInPage({ searchParams }: SignInPageProps) {
         <button type="submit" className="ink-btn ink-btn-primary w-full">
           Enter The App
         </button>
+        <p className="text-center text-sm text-[var(--ink-text-muted)]">
+          Need an account?{" "}
+          <Link href="/register" className="font-semibold text-[var(--ink-accent)]">
+            Register here
+          </Link>
+          .
+        </p>
       </form>
 
-      <section className="ink-panel p-4">
-        <h2 className="font-sans text-sm font-semibold text-[var(--ink-text)]">
-          Demo Accounts
-        </h2>
-        <ul className="mt-3 space-y-2 text-sm text-[var(--ink-text-muted)]">
-          {listDemoUsers().map((demoUser) => (
-            <li key={demoUser.id}>
-              <span className="font-semibold text-[var(--ink-text)]">
-                {demoUser.role}
-              </span>{" "}
-              - {demoUser.email} / {demoUser.password}
-            </li>
-          ))}
-        </ul>
-      </section>
+      {bootstrapUsers.length ? (
+        <section className="ink-panel p-4">
+          <h2 className="font-sans text-sm font-semibold text-[var(--ink-text)]">
+            Local Bootstrap Accounts
+          </h2>
+          <p className="mt-2 text-xs text-[var(--ink-text-soft)]">
+            Development only: these accounts are auto-seeded in non-production environments.
+          </p>
+          <ul className="mt-3 space-y-2 text-sm text-[var(--ink-text-muted)]">
+            {bootstrapUsers.map((bootstrapUser) => (
+              <li key={bootstrapUser.email}>
+                <span className="font-semibold text-[var(--ink-text)]">
+                  {bootstrapUser.role}
+                </span>{" "}
+                - {bootstrapUser.email} / {bootstrapUser.password}
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
     </div>
   );
 }
+

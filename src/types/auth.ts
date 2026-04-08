@@ -1,11 +1,10 @@
 export type UserRole = "reader" | "admin" | "creator";
 
-export interface UserRecord {
+export interface UserPublicRecord {
   id: string;
   email: string;
   name: string;
   role: UserRole;
-  password: string;
 }
 
 export interface SessionPayload {
