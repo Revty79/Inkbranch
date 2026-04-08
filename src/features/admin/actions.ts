@@ -327,13 +327,26 @@ export async function createChoiceAction(formData: FormData) {
 
 export async function updateChoiceAction(formData: FormData) {
   await requireRole("admin");
+  const consequenceScope = readRequired(formData, "consequenceScope");
+  if (
+    consequenceScope !== "global" &&
+    consequenceScope !== "perspective" &&
+    consequenceScope !== "knowledge"
+  ) {
+    throw new Error("Invalid consequence scope.");
+  }
+
   await updateBeatChoice({
     choiceId: readRequired(formData, "choiceId"),
+    beatId: readRequired(formData, "beatId"),
     label: readRequired(formData, "label"),
     description: String(formData.get("description") ?? "").trim() || undefined,
     intentTags: parseCommaList(formData, "intentTags"),
     orderIndex: readNumber(formData, "orderIndex", 100),
     nextBeatId: readRequired(formData, "nextBeatId"),
+    consequenceScope,
+    gatingRules: parseOptionalGate(formData),
+    consequences: parseOptionalConsequence(formData),
   });
 
   revalidateAdminSurface();

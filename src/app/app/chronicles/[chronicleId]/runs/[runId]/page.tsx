@@ -36,6 +36,25 @@ function asNonNegativeNumber(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
 }
 
+function normalizeLabel(value: string | null) {
+  if (!value) {
+    return null;
+  }
+
+  return value.trim().toLowerCase();
+}
+
+function countWords(value: string | null) {
+  if (!value) {
+    return 0;
+  }
+
+  return value
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean).length;
+}
+
 function guidedStatusMessage(status: string | undefined) {
   if (status === "resolved") {
     return "Your typed action was interpreted and mapped to a valid scene decision.";
@@ -69,6 +88,33 @@ export default async function ReaderRunPage({
     asTrimmedString(latestCommittedScene?.metadata["shortSummary"]) ?? context.beat.summary;
   const sceneText =
     asTrimmedString(latestCommittedScene?.sceneText) ?? context.beat.narration;
+  const activeChapterLabel =
+    context.beat.chapterLabel ??
+    asTrimmedString(latestCommittedScene?.metadata["chapterLabel"]);
+  const activeChapterLabelKey = normalizeLabel(activeChapterLabel);
+  const chapterSceneHistory = context.sceneHistory.filter((scene) => {
+    if (!activeChapterLabelKey) {
+      return true;
+    }
+
+    const sceneChapterLabel = asTrimmedString(scene.metadata["chapterLabel"]);
+    return normalizeLabel(sceneChapterLabel) === activeChapterLabelKey;
+  });
+  const fallbackManuscriptHistory =
+    chapterSceneHistory.length > 0
+      ? chapterSceneHistory
+      : latestCommittedScene
+        ? [latestCommittedScene]
+        : [];
+  const chapterManuscriptScenes = fallbackManuscriptHistory.slice(-6);
+  const hiddenChapterSceneCount = Math.max(
+    0,
+    fallbackManuscriptHistory.length - chapterManuscriptScenes.length,
+  );
+  const chapterWordCount = chapterManuscriptScenes.reduce((totalWords, scene) => {
+    const text = asTrimmedString(scene.sceneText);
+    return totalWords + countWords(text);
+  }, 0);
   const visibleStateHints = asStringList(
     latestCommittedScene?.metadata["visibleStateHints"],
     5,
@@ -85,6 +131,14 @@ export default async function ReaderRunPage({
   const lockedCanonCount = asNonNegativeNumber(
     latestCommittedScene?.metadata["lockedCanonCount"],
   );
+  const plannedChapterCount = asNonNegativeNumber(context.bookPlan?.totalChapterCount);
+  const currentChapterNumber = asNonNegativeNumber(context.bookPlan?.currentChapterNumber);
+  const currentSceneIndex = asNonNegativeNumber(context.bookPlan?.currentSceneIndex);
+  const chapterWordCountCommitted = asNonNegativeNumber(
+    context.bookPlan?.chapterWordCount,
+  );
+  const chapterSceneCount = asNonNegativeNumber(context.bookPlan?.chapterSceneCount);
+  const chapterReady = context.bookPlan?.chapterReady === true;
 
   return (
     <div className="space-y-5">
@@ -121,6 +175,33 @@ export default async function ReaderRunPage({
           <span className="ink-pill">
             Scene {context.sceneHistory.length} in this route
           </span>
+          {plannedChapterCount && currentChapterNumber ? (
+            <span className="ink-pill">
+              Chapter {currentChapterNumber} / {plannedChapterCount}
+            </span>
+          ) : null}
+          {currentSceneIndex ? (
+            <span className="ink-pill">Chapter scene {currentSceneIndex}</span>
+          ) : null}
+          {chapterWordCountCommitted ? (
+            <span className="ink-pill">
+              Chapter draft words: {chapterWordCountCommitted}
+            </span>
+          ) : null}
+          {chapterSceneCount ? (
+            <span className="ink-pill">Chapter scenes: {chapterSceneCount}</span>
+          ) : null}
+          {chapterReady ? (
+            <span className="ink-pill">Chapter length ready</span>
+          ) : null}
+          <span className="ink-pill">
+            {activeChapterLabel ? `${activeChapterLabel}` : "Route manuscript"}:{" "}
+            {fallbackManuscriptHistory.length} committed scene
+            {fallbackManuscriptHistory.length === 1 ? "" : "s"}
+          </span>
+          {chapterWordCount > 0 ? (
+            <span className="ink-pill">{chapterWordCount} words in view</span>
+          ) : null}
         </div>
         <h2 className="mt-4 font-sans text-3xl font-semibold tracking-tight text-[var(--ink-text)]">
           {sceneTitle}
@@ -147,10 +228,55 @@ export default async function ReaderRunPage({
             AI fallback reason: {fallbackReason}
           </p>
         ) : null}
-        <div className="mt-5 border-t border-[var(--ink-border)] pt-5">
-          <p className="whitespace-pre-line text-base leading-8 text-[var(--ink-text)] sm:text-lg">
-            {sceneText}
-          </p>
+        <div className="mt-5 space-y-4 border-t border-[var(--ink-border)] pt-5">
+          {hiddenChapterSceneCount > 0 ? (
+            <p className="rounded-md border border-[var(--ink-border)] bg-[var(--ink-surface)] p-3 text-xs text-[var(--ink-text-soft)]">
+              Showing the latest {chapterManuscriptScenes.length} committed scenes from this
+              chapter manuscript.
+            </p>
+          ) : null}
+          {chapterManuscriptScenes.length ? (
+            chapterManuscriptScenes.map((scene, index) => {
+              const manuscriptSceneTitle =
+                asTrimmedString(scene.metadata["sceneTitle"]) ??
+                `Section ${hiddenChapterSceneCount + index + 1}`;
+              const manuscriptSummary = asTrimmedString(scene.metadata["shortSummary"]);
+              const manuscriptText = asTrimmedString(scene.sceneText) ?? "";
+              const isLatestScene = latestCommittedScene
+                ? scene.id === latestCommittedScene.id
+                : index === chapterManuscriptScenes.length - 1;
+
+              return (
+                <section
+                  key={scene.id}
+                  className={`rounded-md border p-4 ${
+                    isLatestScene
+                      ? "border-[var(--ink-text-soft)] bg-[var(--ink-surface)]"
+                      : "border-[var(--ink-border)]"
+                  }`}
+                >
+                  <p className="ink-label">
+                    {isLatestScene ? "Current Scene" : "Earlier Chapter Section"}
+                  </p>
+                  <h3 className="mt-2 font-sans text-xl font-semibold text-[var(--ink-text)]">
+                    {manuscriptSceneTitle}
+                  </h3>
+                  {manuscriptSummary ? (
+                    <p className="mt-2 text-sm text-[var(--ink-text-muted)]">
+                      {manuscriptSummary}
+                    </p>
+                  ) : null}
+                  <p className="mt-3 whitespace-pre-line text-base leading-8 text-[var(--ink-text)] sm:text-lg">
+                    {manuscriptText}
+                  </p>
+                </section>
+              );
+            })
+          ) : (
+            <p className="whitespace-pre-line text-base leading-8 text-[var(--ink-text)] sm:text-lg">
+              {sceneText}
+            </p>
+          )}
         </div>
         {visibleStateHints.length || continuityNotes.length || suggestedChoiceMood ? (
           <div className="mt-5 grid gap-3 sm:grid-cols-2">
@@ -195,8 +321,9 @@ export default async function ReaderRunPage({
           What do you do?
         </h2>
         <p className="text-sm text-[var(--ink-text-muted)]">
-          Choose a route decision below. Decisions remain constrained by Chronicle
-          continuity, perspective state, and known information.
+          Choose a route decision below. Choices are committed as this chapter evolves
+          and remain constrained by Chronicle continuity, perspective state, and known
+          information.
         </p>
 
         {context.choices.length ? (

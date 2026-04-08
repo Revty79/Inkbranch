@@ -7,9 +7,9 @@ function readAiMode(): InkbranchAiMode {
 }
 
 function readOllamaTimeoutMs() {
-  const raw = Number.parseInt(process.env.OLLAMA_TIMEOUT_MS ?? "45000", 10);
+  const raw = Number.parseInt(process.env.OLLAMA_TIMEOUT_MS ?? "180000", 10);
   if (!Number.isFinite(raw) || raw <= 0) {
-    return 45000;
+    return 180000;
   }
   return raw;
 }

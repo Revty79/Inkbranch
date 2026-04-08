@@ -33,11 +33,22 @@ export default async function ChronicleDetailPage({
           Version {chronicleData.version.versionLabel} - status{" "}
           {chronicleData.chronicle.status}
         </p>
+        {chronicleData.unlockState.totalChapterCount ? (
+          <p className="text-sm text-[var(--ink-text-soft)]">
+            Planned book length: {chronicleData.unlockState.totalChapterCount} chapters.
+          </p>
+        ) : null}
       </header>
 
       {guidedMessage ? (
         <div className="ink-panel p-3 text-sm text-[var(--ink-text-muted)]">
           {guidedMessage}
+        </div>
+      ) : null}
+      {!chronicleData.unlockState.firstReadComplete ? (
+        <div className="ink-panel p-3 text-sm text-[var(--ink-text-muted)]">
+          Perspective discovery is locked during first read-through. Complete one
+          full run to reveal additional character viewpoints in this Chronicle.
         </div>
       ) : null}
 

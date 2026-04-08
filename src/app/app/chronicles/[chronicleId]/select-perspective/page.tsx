@@ -14,6 +14,7 @@ export default async function SelectPerspectivePage({
   const { chronicleId } = await params;
   const user = await requireAuthenticatedUser();
   const viewpoints = await loadPerspectiveSelection(user.id, chronicleId);
+  const firstReadComplete = viewpoints[0]?.firstReadComplete ?? true;
 
   return (
     <div className="space-y-4">
@@ -26,6 +27,12 @@ export default async function SelectPerspectivePage({
           Each viewpoint enters the same Chronicle from a different life and
           knowledge boundary. Existing runs can be resumed at any time.
         </p>
+        {!firstReadComplete ? (
+          <p className="text-sm text-[var(--ink-text-soft)]">
+            Additional perspectives stay hidden until your first full run is complete,
+            so the initial canon can lock in cleanly.
+          </p>
+        ) : null}
       </header>
 
       <div className="grid gap-4 sm:grid-cols-2">

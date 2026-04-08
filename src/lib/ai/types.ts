@@ -20,6 +20,24 @@ export type GeneratedScenePayload = {
   emergentCanonCandidates?: EmergentCanonCandidate[];
 };
 
+export type BranchChapterDirective = "stay" | "advance" | "finale";
+
+export type GeneratedBranchChoicePayload = {
+  label: string;
+  description: string;
+  intentTags: string[];
+  nextBeatTitle: string;
+  nextBeatSummary: string;
+  nextBeatAtmosphere?: string | null;
+  chapterDirective?: BranchChapterDirective | null;
+};
+
+export type GeneratedBranchPayload = {
+  chapterTitle?: string | null;
+  continuityNotes?: string[];
+  choices: GeneratedBranchChoicePayload[];
+};
+
 function asOptionalString(value: unknown) {
   if (typeof value !== "string") {
     return null;
@@ -56,6 +74,13 @@ function asCanonConfidence(value: unknown): EmergentCanonConfidence | null {
   return null;
 }
 
+function asChapterDirective(value: unknown): BranchChapterDirective | null {
+  if (value === "stay") return "stay";
+  if (value === "advance") return "advance";
+  if (value === "finale") return "finale";
+  return null;
+}
+
 function asEmergentCanonCandidates(value: unknown, maxItems = 3): EmergentCanonCandidate[] {
   if (!Array.isArray(value)) {
     return [];
@@ -87,6 +112,56 @@ function asEmergentCanonCandidates(value: unknown, maxItems = 3): EmergentCanonC
     .slice(0, maxItems);
 }
 
+function asIntentTags(value: unknown, maxItems = 6) {
+  if (!Array.isArray(value)) {
+    return [] as string[];
+  }
+
+  const normalized = value
+    .map((tag) => (typeof tag === "string" ? tag.trim().toLowerCase() : ""))
+    .filter((tag): tag is string => Boolean(tag))
+    .slice(0, maxItems);
+
+  return Array.from(new Set(normalized));
+}
+
+function asGeneratedBranchChoices(
+  value: unknown,
+  maxItems = 4,
+): GeneratedBranchChoicePayload[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((item): GeneratedBranchChoicePayload | null => {
+      if (!item || typeof item !== "object") {
+        return null;
+      }
+
+      const source = item as Record<string, unknown>;
+      const label = asOptionalString(source.label);
+      const description = asOptionalString(source.description);
+      const nextBeatTitle = asOptionalString(source.nextBeatTitle);
+      const nextBeatSummary = asOptionalString(source.nextBeatSummary);
+      if (!label || !description || !nextBeatTitle || !nextBeatSummary) {
+        return null;
+      }
+
+      return {
+        label,
+        description,
+        intentTags: asIntentTags(source.intentTags),
+        nextBeatTitle,
+        nextBeatSummary,
+        nextBeatAtmosphere: asOptionalString(source.nextBeatAtmosphere),
+        chapterDirective: asChapterDirective(source.chapterDirective),
+      };
+    })
+    .filter((entry): entry is GeneratedBranchChoicePayload => entry !== null)
+    .slice(0, maxItems);
+}
+
 export function coerceGeneratedScenePayload(input: unknown): GeneratedScenePayload | null {
   if (!input || typeof input !== "object") {
     return null;
@@ -107,6 +182,24 @@ export function coerceGeneratedScenePayload(input: unknown): GeneratedScenePaylo
     suggestedChoiceMood: asOptionalString(candidate.suggestedChoiceMood),
     continuityNotes: asStringList(candidate.continuityNotes),
     emergentCanonCandidates: asEmergentCanonCandidates(candidate.emergentCanonCandidates),
+  };
+}
+
+export function coerceGeneratedBranchPayload(input: unknown): GeneratedBranchPayload | null {
+  if (!input || typeof input !== "object") {
+    return null;
+  }
+
+  const candidate = input as Record<string, unknown>;
+  const choices = asGeneratedBranchChoices(candidate.choices);
+  if (choices.length < 2) {
+    return null;
+  }
+
+  return {
+    chapterTitle: asOptionalString(candidate.chapterTitle),
+    continuityNotes: asStringList(candidate.continuityNotes),
+    choices,
   };
 }
 

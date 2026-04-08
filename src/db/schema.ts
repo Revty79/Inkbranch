@@ -393,6 +393,38 @@ export const generatedScenes = pgTable(
   (table) => [index("generated_scenes_run_idx").on(table.perspectiveRunId)],
 );
 
+export const storyChapters = pgTable(
+  "story_chapters",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    chronicleId: uuid("chronicle_id")
+      .notNull()
+      .references(() => chronicles.id, { onDelete: "cascade" }),
+    perspectiveRunId: uuid("perspective_run_id")
+      .notNull()
+      .references(() => perspectiveRuns.id, { onDelete: "cascade" }),
+    chapterNumber: integer("chapter_number").notNull(),
+    chapterLabel: text("chapter_label").notNull(),
+    chapterTitle: text("chapter_title").notNull(),
+    chapterSummary: text("chapter_summary").notNull(),
+    chapterText: text("chapter_text").notNull(),
+    sceneCount: integer("scene_count").notNull().default(0),
+    wordCount: integer("word_count").notNull().default(0),
+    sourceLabel: text("source_label").notNull().default("seeded"),
+    isReady: boolean("is_ready").notNull().default(false),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("story_chapters_chronicle_idx").on(table.chronicleId),
+    uniqueIndex("story_chapters_run_chapter_idx").on(
+      table.perspectiveRunId,
+      table.chapterNumber,
+    ),
+  ],
+);
+
 export const storyRuntimeState = pgTable("story_runtime_state", {
   key: text("key").primaryKey(),
   payload: jsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
@@ -466,6 +498,7 @@ export type PerspectiveKnowledgeFlag = InferSelectModel<
   typeof perspectiveKnowledgeFlags
 >;
 export type GeneratedScene = InferSelectModel<typeof generatedScenes>;
+export type StoryChapter = InferSelectModel<typeof storyChapters>;
 export type CanonicalEvent = InferSelectModel<typeof canonicalEventLog>;
 export type StoryRuntimeState = InferSelectModel<typeof storyRuntimeState>;
 
@@ -478,4 +511,5 @@ export type NewStoryBeat = InferInsertModel<typeof storyBeats>;
 export type NewBeatChoice = InferInsertModel<typeof beatChoices>;
 export type NewChronicle = InferInsertModel<typeof chronicles>;
 export type NewPerspectiveRun = InferInsertModel<typeof perspectiveRuns>;
+export type NewStoryChapter = InferInsertModel<typeof storyChapters>;
 export type NewStoryRuntimeState = InferInsertModel<typeof storyRuntimeState>;

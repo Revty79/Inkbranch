@@ -11,14 +11,19 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:push": "drizzle-kit push",
-    "db:push:force": "drizzle-kit push --force"
+    "db:push:force": "drizzle-kit push --force",
+    "story:seed:min": "set NODE_OPTIONS=--conditions=react-server&& tsx scripts/seed-minimum-chronicle.ts",
+    "story:resync": "tsx scripts/resync-structured-story.ts",
+    "story:probe:ollama": "set NODE_OPTIONS=--conditions=react-server&& tsx scripts/probe-ollama-runtime.ts",
+    "story:probe:scene": "set NODE_OPTIONS=--conditions=react-server&& tsx scripts/probe-ollama-scene.ts"
   },
   "dependencies": {
     "drizzle-orm": "^0.44.2",
     "next": "16.2.2",
     "pg": "^8.16.3",
     "react": "19.2.4",
-    "react-dom": "19.2.4"
+    "react-dom": "19.2.4",
+    "server-only": "^0.0.1"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
@@ -32,6 +37,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.2.2",
     "tailwindcss": "^4",
+    "tsx": "^4.21.0",
     "typescript": "^5"
   }
 }

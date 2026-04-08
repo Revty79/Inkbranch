@@ -11,6 +11,7 @@ type OllamaChatInput = {
   messages: OllamaChatMessage[];
   model?: string;
   timeoutMs?: number;
+  keepAlive?: string;
 };
 
 type OllamaChatSuccess = {
@@ -67,6 +68,7 @@ export async function chatJsonWithOllama(
 ): Promise<OllamaChatSuccess> {
   const model = input.model ?? env.ollamaModel;
   const timeoutMs = input.timeoutMs ?? env.ollamaTimeoutMs;
+  const keepAlive = input.keepAlive ?? "30m";
   const controller = new AbortController();
   const timeoutHandle = setTimeout(() => {
     controller.abort();
@@ -83,6 +85,7 @@ export async function chatJsonWithOllama(
           model: modelName,
           stream: false,
           format: "json",
+          keep_alive: keepAlive,
           messages: input.messages,
         }),
         signal: controller.signal,

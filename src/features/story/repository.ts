@@ -1,7 +1,28 @@
 import "server-only";
 
-import { generateNarrativeScene } from "@/features/story/scene-generator";
-import { storyRuntimeState } from "@/db/schema";
+import {
+  generateNarrativeBranch,
+  generateNarrativeScene,
+} from "@/features/story/scene-generator";
+import {
+  beatChoices as beatChoicesTable,
+  canonicalEventLog as canonicalEventLogTable,
+  chronicleWorldStateValues as chronicleWorldStateValuesTable,
+  chronicles as chroniclesTable,
+  generatedScenes as generatedScenesTable,
+  perspectiveKnowledgeFlags as perspectiveKnowledgeFlagsTable,
+  perspectiveRuns as perspectiveRunsTable,
+  perspectiveStateValues as perspectiveStateValuesTable,
+  playableViewpoints as playableViewpointsTable,
+  storyBeats as storyBeatsTable,
+  storyCanonEntries as storyCanonEntriesTable,
+  storyCharacters as storyCharactersTable,
+  storyChapters as storyChaptersTable,
+  storyRuntimeState,
+  storyVersions as storyVersionsTable,
+  storyWorlds as storyWorldsTable,
+  users as usersTable,
+} from "@/db/schema";
 import {
   scenePayloadToMetadata,
   type GeneratedScenePayload,
@@ -23,10 +44,11 @@ import type {
   ReaderStoryDetail,
   ReaderWorldCard,
   StoryBeatRecord,
+  StoryChapterRecord,
 } from "@/types/story";
 import { eq } from "drizzle-orm";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 
 const DATA_DIRECTORY = path.join(process.cwd(), "data");
@@ -35,6 +57,16 @@ const STORY_RUNTIME_KEY = "primary";
 const GUIDED_ACTION_TEXT_LIMIT = 180;
 const MAX_EMERGENT_CANON_PER_SCENE = 3;
 const MIN_EMERGENT_CANON_BODY_LENGTH = 32;
+const MIN_CHAPTER_WORDS = 1200;
+const MIN_CHAPTER_SCENES = 3;
+const INTERNAL_STATE_PREFIX = "__inkbranch_";
+const CHRONICLE_RUNTIME_MODE_KEY = `${INTERNAL_STATE_PREFIX}runtime_mode`;
+const CHRONICLE_TOTAL_CHAPTERS_KEY = `${INTERNAL_STATE_PREFIX}total_chapters`;
+const CHRONICLE_CHAPTER_TITLES_KEY = `${INTERNAL_STATE_PREFIX}chapter_titles`;
+const CHRONICLE_PRIMARY_VIEWPOINT_KEY = `${INTERNAL_STATE_PREFIX}primary_viewpoint_id`;
+const CHRONICLE_FIRST_READ_COMPLETE_KEY = `${INTERNAL_STATE_PREFIX}first_read_complete`;
+const CHRONICLE_FIRST_COMPLETED_RUN_KEY = `${INTERNAL_STATE_PREFIX}first_completed_run_id`;
+const CHRONICLE_MODE_PROCEDURAL = "procedural_chapter_book";
 
 const ACTION_TAG_HINTS: Record<string, string[]> = {
   investigate: ["investigate", "inspect", "search", "question", "probe", "clue"],
@@ -51,6 +83,7 @@ const ACTION_TAG_HINTS: Record<string, string[]> = {
 };
 
 let dbCache: LocalStoryDb | null = null;
+let mutationQueue: Promise<void> = Promise.resolve();
 
 function nowIso() {
   return new Date().toISOString();
@@ -111,11 +144,53 @@ function normalizeBeatChoiceRecord(choice: BeatChoiceRecord): BeatChoiceRecord {
   };
 }
 
+function normalizeStoryChapterRecord(chapter: StoryChapterRecord): StoryChapterRecord {
+  const chapterNumber =
+    Number.isFinite(chapter.chapterNumber) && chapter.chapterNumber > 0
+      ? Math.floor(chapter.chapterNumber)
+      : 1;
+  const sceneCount =
+    Number.isFinite(chapter.sceneCount) && chapter.sceneCount >= 0
+      ? Math.floor(chapter.sceneCount)
+      : 0;
+  const wordCount =
+    Number.isFinite(chapter.wordCount) && chapter.wordCount >= 0
+      ? Math.floor(chapter.wordCount)
+      : 0;
+  const chapterLabel = readOptionalString(chapter.chapterLabel) ?? `Chapter ${chapterNumber}`;
+  const chapterTitle = readOptionalString(chapter.chapterTitle) ?? chapterLabel;
+  const chapterSummary =
+    readOptionalString(chapter.chapterSummary) ?? "Chapter draft in progress.";
+  const chapterText = typeof chapter.chapterText === "string" ? chapter.chapterText : "";
+
+  return {
+    ...chapter,
+    chapterNumber,
+    chapterLabel,
+    chapterTitle,
+    chapterSummary,
+    chapterText,
+    sceneCount,
+    wordCount,
+    sourceLabel: readOptionalString(chapter.sourceLabel) ?? "seeded",
+    isReady:
+      Boolean(chapter.isReady) ||
+      (wordCount >= MIN_CHAPTER_WORDS && sceneCount >= MIN_CHAPTER_SCENES),
+    metadata:
+      chapter.metadata && typeof chapter.metadata === "object" ? chapter.metadata : {},
+    createdAt: chapter.createdAt || nowIso(),
+    updatedAt: chapter.updatedAt || nowIso(),
+  };
+}
+
 function normalizeDbShape(db: LocalStoryDb): LocalStoryDb {
   return {
     ...db,
     storyBeats: db.storyBeats.map((beat) => normalizeStoryBeatRecord(beat)),
     beatChoices: db.beatChoices.map((choice) => normalizeBeatChoiceRecord(choice)),
+    storyChapters: (db.storyChapters ?? []).map((chapter) =>
+      normalizeStoryChapterRecord(chapter),
+    ),
   };
 }
 
@@ -134,6 +209,7 @@ function createEmptyStoryDb(): LocalStoryDb {
     perspectiveStateValues: [],
     perspectiveKnowledgeFlags: [],
     generatedScenes: [],
+    storyChapters: [],
     canonicalEventLog: [],
   };
 }
@@ -184,6 +260,406 @@ async function writeRuntimeStateToPostgres(db: LocalStoryDb) {
     });
 }
 
+function createUuidIdMap<T extends { id: string }>(scope: string, rows: T[]) {
+  return new Map(rows.map((row) => [row.id, localIdToUuid(scope, row.id)]));
+}
+
+async function syncStructuredTablesToPostgres(db: LocalStoryDb) {
+  const worldIdMap = createUuidIdMap("world", db.storyWorlds);
+  const versionIdMap = createUuidIdMap("version", db.storyVersions);
+  const characterIdMap = createUuidIdMap("character", db.storyCharacters);
+  const beatIdMap = createUuidIdMap("beat", db.storyBeats);
+  const viewpointIdMap = createUuidIdMap("viewpoint", db.playableViewpoints);
+  const choiceIdMap = createUuidIdMap("choice", db.beatChoices);
+  const canonIdMap = createUuidIdMap("canon", db.storyCanonEntries);
+  const chronicleIdMap = createUuidIdMap("chronicle", db.chronicles);
+  const chronicleStateIdMap = createUuidIdMap(
+    "chronicle_state",
+    db.chronicleWorldStateValues,
+  );
+  const runIdMap = createUuidIdMap("run", db.perspectiveRuns);
+  const perspectiveStateIdMap = createUuidIdMap(
+    "perspective_state",
+    db.perspectiveStateValues,
+  );
+  const knowledgeIdMap = createUuidIdMap("knowledge", db.perspectiveKnowledgeFlags);
+  const sceneIdMap = createUuidIdMap("scene", db.generatedScenes);
+  const eventIdMap = createUuidIdMap("event", db.canonicalEventLog);
+  const chapterIdMap = createUuidIdMap("chapter", db.storyChapters);
+
+  const userRows = await postgresDb.select({ id: usersTable.id }).from(usersTable);
+  const validUserIds = new Set(userRows.map((row) => row.id));
+
+  const validChronicles = db.chronicles.filter((chronicle) => validUserIds.has(chronicle.userId));
+  const validChronicleIds = new Set(validChronicles.map((chronicle) => chronicle.id));
+  const validRuns = db.perspectiveRuns.filter(
+    (run) =>
+      validChronicleIds.has(run.chronicleId) &&
+      viewpointIdMap.has(run.viewpointId) &&
+      beatIdMap.has(run.currentBeatId),
+  );
+  const validRunIds = new Set(validRuns.map((run) => run.id));
+
+  await postgresDb.transaction(async (tx) => {
+    await tx.delete(generatedScenesTable);
+    await tx.delete(canonicalEventLogTable);
+    await tx.delete(storyChaptersTable);
+    await tx.delete(perspectiveKnowledgeFlagsTable);
+    await tx.delete(perspectiveStateValuesTable);
+    await tx.delete(perspectiveRunsTable);
+    await tx.delete(chronicleWorldStateValuesTable);
+    await tx.delete(chroniclesTable);
+    await tx.delete(beatChoicesTable);
+    await tx.delete(playableViewpointsTable);
+    await tx.delete(storyBeatsTable);
+    await tx.delete(storyCanonEntriesTable);
+    await tx.delete(storyCharactersTable);
+    await tx.delete(storyVersionsTable);
+    await tx.delete(storyWorldsTable);
+
+    if (db.storyWorlds.length) {
+      await tx.insert(storyWorldsTable).values(
+        db.storyWorlds.map((world) => ({
+          id: mapLocalId(worldIdMap, world.id) ?? localIdToUuid("world", world.id),
+          slug: world.slug,
+          title: world.title,
+          synopsis: world.synopsis,
+          tone: world.tone,
+          isFeatured: world.isFeatured,
+          createdAt: asDate(world.createdAt),
+          updatedAt: asDate(world.updatedAt),
+        })),
+      );
+    }
+
+    if (db.storyVersions.length) {
+      await tx.insert(storyVersionsTable).values(
+        db.storyVersions
+          .filter((version) => worldIdMap.has(version.worldId))
+          .map((version) => ({
+            id: mapLocalId(versionIdMap, version.id) ?? localIdToUuid("version", version.id),
+            worldId:
+              mapLocalId(worldIdMap, version.worldId) ??
+              localIdToUuid("world", version.worldId),
+            versionLabel: version.versionLabel,
+            description: version.description,
+            status: version.status,
+            isDefaultPublished: version.isDefaultPublished,
+            publishedAt: version.publishedAt ? asDate(version.publishedAt) : null,
+            createdAt: asDate(version.createdAt),
+            updatedAt: asDate(version.updatedAt),
+          })),
+      );
+    }
+
+    if (db.storyCharacters.length) {
+      await tx.insert(storyCharactersTable).values(
+        db.storyCharacters
+          .filter((character) => worldIdMap.has(character.worldId))
+          .map((character) => ({
+            id:
+              mapLocalId(characterIdMap, character.id) ??
+              localIdToUuid("character", character.id),
+            worldId:
+              mapLocalId(worldIdMap, character.worldId) ??
+              localIdToUuid("world", character.worldId),
+            slug: character.slug,
+            name: character.name,
+            summary: character.summary,
+            createdAt: asDate(character.createdAt),
+            updatedAt: asDate(character.updatedAt),
+          })),
+      );
+    }
+
+    if (db.storyCanonEntries.length) {
+      await tx.insert(storyCanonEntriesTable).values(
+        db.storyCanonEntries
+          .filter((entry) => versionIdMap.has(entry.versionId))
+          .map((entry) => ({
+            id: mapLocalId(canonIdMap, entry.id) ?? localIdToUuid("canon", entry.id),
+            versionId:
+              mapLocalId(versionIdMap, entry.versionId) ??
+              localIdToUuid("version", entry.versionId),
+            entryType: entry.entryType,
+            canonKey: entry.canonKey,
+            title: entry.title,
+            body: entry.body,
+            isContradictionSensitive: entry.isContradictionSensitive,
+            metadata: (entry.metadata ?? {}) as unknown as Record<string, unknown>,
+            createdAt: asDate(entry.createdAt),
+            updatedAt: asDate(entry.updatedAt),
+          })),
+      );
+    }
+
+    if (db.storyBeats.length) {
+      await tx.insert(storyBeatsTable).values(
+        db.storyBeats
+          .filter((beat) => versionIdMap.has(beat.versionId))
+          .map((beat) => ({
+            id: mapLocalId(beatIdMap, beat.id) ?? localIdToUuid("beat", beat.id),
+            versionId:
+              mapLocalId(versionIdMap, beat.versionId) ??
+              localIdToUuid("version", beat.versionId),
+            slug: beat.slug,
+            title: beat.title,
+            sceneSubtitle: beat.sceneSubtitle,
+            chapterLabel: beat.chapterLabel,
+            summary: beat.summary,
+            narration: beat.narration,
+            atmosphere: beat.atmosphere,
+            allowsGuidedAction: beat.allowsGuidedAction,
+            guidedActionPrompt: beat.guidedActionPrompt,
+            allowedActionTags: beat.allowedActionTags,
+            fallbackChoiceId: mapLocalId(choiceIdMap, beat.fallbackChoiceId) ?? beat.fallbackChoiceId,
+            beatType: beat.beatType,
+            orderIndex: beat.orderIndex,
+            isTerminal: beat.isTerminal,
+            metadata: (beat.metadata ?? {}) as unknown as Record<string, unknown>,
+            createdAt: asDate(beat.createdAt),
+            updatedAt: asDate(beat.updatedAt),
+          })),
+      );
+    }
+
+    if (db.playableViewpoints.length) {
+      await tx.insert(playableViewpointsTable).values(
+        db.playableViewpoints
+          .filter(
+            (viewpoint) =>
+              versionIdMap.has(viewpoint.versionId) &&
+              characterIdMap.has(viewpoint.characterId),
+          )
+          .map((viewpoint) => ({
+            id:
+              mapLocalId(viewpointIdMap, viewpoint.id) ??
+              localIdToUuid("viewpoint", viewpoint.id),
+            versionId:
+              mapLocalId(versionIdMap, viewpoint.versionId) ??
+              localIdToUuid("version", viewpoint.versionId),
+            characterId:
+              mapLocalId(characterIdMap, viewpoint.characterId) ??
+              localIdToUuid("character", viewpoint.characterId),
+            label: viewpoint.label,
+            description: viewpoint.description,
+            startBeatId: mapLocalId(beatIdMap, viewpoint.startBeatId),
+            isPlayable: viewpoint.isPlayable,
+            orderIndex: viewpoint.orderIndex,
+            createdAt: asDate(viewpoint.createdAt),
+            updatedAt: asDate(viewpoint.updatedAt),
+          })),
+      );
+    }
+
+    if (db.beatChoices.length) {
+      await tx.insert(beatChoicesTable).values(
+        db.beatChoices
+          .filter((choice) => beatIdMap.has(choice.beatId))
+          .map((choice) => ({
+            id: mapLocalId(choiceIdMap, choice.id) ?? localIdToUuid("choice", choice.id),
+            beatId:
+              mapLocalId(beatIdMap, choice.beatId) ?? localIdToUuid("beat", choice.beatId),
+            label: choice.label,
+            internalKey: choice.internalKey,
+            description: choice.description,
+            orderIndex: choice.orderIndex,
+            nextBeatId: mapLocalId(beatIdMap, choice.nextBeatId),
+            intentTags: choice.intentTags,
+            consequenceScope: choice.consequenceScope,
+            gatingRules: choice.gatingRules as unknown as Record<string, unknown>[],
+            consequences: choice.consequences as unknown as Record<string, unknown>[],
+            metadata: (choice.metadata ?? {}) as unknown as Record<string, unknown>,
+            createdAt: asDate(choice.createdAt),
+            updatedAt: asDate(choice.updatedAt),
+          })),
+      );
+    }
+
+    if (validChronicles.length) {
+      await tx.insert(chroniclesTable).values(
+        validChronicles
+          .filter(
+            (chronicle) =>
+              worldIdMap.has(chronicle.worldId) && versionIdMap.has(chronicle.versionId),
+          )
+          .map((chronicle) => ({
+            id:
+              mapLocalId(chronicleIdMap, chronicle.id) ??
+              localIdToUuid("chronicle", chronicle.id),
+            userId: chronicle.userId,
+            worldId:
+              mapLocalId(worldIdMap, chronicle.worldId) ??
+              localIdToUuid("world", chronicle.worldId),
+            versionId:
+              mapLocalId(versionIdMap, chronicle.versionId) ??
+              localIdToUuid("version", chronicle.versionId),
+            status: chronicle.status,
+            startedAt: asDate(chronicle.startedAt),
+            lastActiveAt: asDate(chronicle.lastActiveAt),
+            completedAt: chronicle.completedAt ? asDate(chronicle.completedAt) : null,
+          })),
+      );
+    }
+
+    const chronicleStates = db.chronicleWorldStateValues.filter((entry) =>
+      validChronicleIds.has(entry.chronicleId),
+    );
+    if (chronicleStates.length) {
+      await tx.insert(chronicleWorldStateValuesTable).values(
+        chronicleStates.map((entry) => ({
+          id:
+            mapLocalId(chronicleStateIdMap, entry.id) ??
+            localIdToUuid("chronicle_state", entry.id),
+          chronicleId:
+            mapLocalId(chronicleIdMap, entry.chronicleId) ??
+            localIdToUuid("chronicle", entry.chronicleId),
+          stateKey: entry.stateKey,
+          stateValue: entry.stateValue as unknown,
+          updatedAt: asDate(entry.updatedAt),
+        })),
+      );
+    }
+
+    if (validRuns.length) {
+      await tx.insert(perspectiveRunsTable).values(
+        validRuns.map((run) => ({
+          id: mapLocalId(runIdMap, run.id) ?? localIdToUuid("run", run.id),
+          chronicleId:
+            mapLocalId(chronicleIdMap, run.chronicleId) ??
+            localIdToUuid("chronicle", run.chronicleId),
+          viewpointId:
+            mapLocalId(viewpointIdMap, run.viewpointId) ??
+            localIdToUuid("viewpoint", run.viewpointId),
+          currentBeatId:
+            mapLocalId(beatIdMap, run.currentBeatId) ??
+            localIdToUuid("beat", run.currentBeatId),
+          status: run.status,
+          summary: run.summary,
+          startedAt: asDate(run.startedAt),
+          lastActiveAt: asDate(run.lastActiveAt),
+          completedAt: run.completedAt ? asDate(run.completedAt) : null,
+        })),
+      );
+    }
+
+    const perspectiveStates = db.perspectiveStateValues.filter((entry) =>
+      validRunIds.has(entry.perspectiveRunId),
+    );
+    if (perspectiveStates.length) {
+      await tx.insert(perspectiveStateValuesTable).values(
+        perspectiveStates.map((entry) => ({
+          id:
+            mapLocalId(perspectiveStateIdMap, entry.id) ??
+            localIdToUuid("perspective_state", entry.id),
+          perspectiveRunId:
+            mapLocalId(runIdMap, entry.perspectiveRunId) ??
+            localIdToUuid("run", entry.perspectiveRunId),
+          stateKey: entry.stateKey,
+          stateValue: entry.stateValue as unknown,
+          updatedAt: asDate(entry.updatedAt),
+        })),
+      );
+    }
+
+    const knowledgeFlags = db.perspectiveKnowledgeFlags.filter((entry) =>
+      validRunIds.has(entry.perspectiveRunId),
+    );
+    if (knowledgeFlags.length) {
+      await tx.insert(perspectiveKnowledgeFlagsTable).values(
+        knowledgeFlags.map((entry) => ({
+          id: mapLocalId(knowledgeIdMap, entry.id) ?? localIdToUuid("knowledge", entry.id),
+          perspectiveRunId:
+            mapLocalId(runIdMap, entry.perspectiveRunId) ??
+            localIdToUuid("run", entry.perspectiveRunId),
+          flagKey: entry.flagKey,
+          status: entry.status,
+          details: entry.details,
+          updatedAt: asDate(entry.updatedAt),
+        })),
+      );
+    }
+
+    const scenes = db.generatedScenes.filter(
+      (scene) =>
+        validChronicleIds.has(scene.chronicleId) &&
+        validRunIds.has(scene.perspectiveRunId) &&
+        beatIdMap.has(scene.beatId),
+    );
+    if (scenes.length) {
+      await tx.insert(generatedScenesTable).values(
+        scenes.map((scene) => ({
+          id: mapLocalId(sceneIdMap, scene.id) ?? localIdToUuid("scene", scene.id),
+          chronicleId:
+            mapLocalId(chronicleIdMap, scene.chronicleId) ??
+            localIdToUuid("chronicle", scene.chronicleId),
+          perspectiveRunId:
+            mapLocalId(runIdMap, scene.perspectiveRunId) ??
+            localIdToUuid("run", scene.perspectiveRunId),
+          beatId:
+            mapLocalId(beatIdMap, scene.beatId) ?? localIdToUuid("beat", scene.beatId),
+          sceneText: scene.sceneText,
+          sourceLabel: scene.sourceLabel,
+          metadata: (scene.metadata ?? {}) as unknown as Record<string, unknown>,
+          createdAt: asDate(scene.createdAt),
+        })),
+      );
+    }
+
+    const events = db.canonicalEventLog.filter((event) =>
+      validChronicleIds.has(event.chronicleId),
+    );
+    if (events.length) {
+      await tx.insert(canonicalEventLogTable).values(
+        events.map((event) => ({
+          id: mapLocalId(eventIdMap, event.id) ?? localIdToUuid("event", event.id),
+          chronicleId:
+            mapLocalId(chronicleIdMap, event.chronicleId) ??
+            localIdToUuid("chronicle", event.chronicleId),
+          perspectiveRunId: mapLocalId(runIdMap, event.perspectiveRunId),
+          beatId: mapLocalId(beatIdMap, event.beatId),
+          choiceId: mapLocalId(choiceIdMap, event.choiceId),
+          eventType: event.eventType,
+          summary: event.summary,
+          payload: (event.payload ?? {}) as unknown as Record<string, unknown>,
+          createdAt: asDate(event.createdAt),
+        })),
+      );
+    }
+
+    const chapters = db.storyChapters.filter(
+      (chapter) =>
+        validChronicleIds.has(chapter.chronicleId) &&
+        validRunIds.has(chapter.perspectiveRunId),
+    );
+    if (chapters.length) {
+      await tx.insert(storyChaptersTable).values(
+        chapters.map((chapter) => ({
+          id: mapLocalId(chapterIdMap, chapter.id) ?? localIdToUuid("chapter", chapter.id),
+          chronicleId:
+            mapLocalId(chronicleIdMap, chapter.chronicleId) ??
+            localIdToUuid("chronicle", chapter.chronicleId),
+          perspectiveRunId:
+            mapLocalId(runIdMap, chapter.perspectiveRunId) ??
+            localIdToUuid("run", chapter.perspectiveRunId),
+          chapterNumber: chapter.chapterNumber,
+          chapterLabel: chapter.chapterLabel,
+          chapterTitle: chapter.chapterTitle,
+          chapterSummary: chapter.chapterSummary,
+          chapterText: chapter.chapterText,
+          sceneCount: chapter.sceneCount,
+          wordCount: chapter.wordCount,
+          sourceLabel: chapter.sourceLabel,
+          isReady: chapter.isReady,
+          metadata: (chapter.metadata ?? {}) as unknown as Record<string, unknown>,
+          createdAt: asDate(chapter.createdAt),
+          updatedAt: asDate(chapter.updatedAt),
+        })),
+      );
+    }
+  });
+}
+
 async function ensureDbLoaded() {
   if (dbCache) {
     return structuredClone(dbCache);
@@ -221,8 +697,10 @@ async function ensureDbLoaded() {
 
 async function saveDb(db: LocalStoryDb) {
   dbCache = structuredClone(db);
+  rebuildStoryChaptersFromGeneratedScenes(dbCache);
   if (env.inkbranchStorageMode === "postgres") {
     await writeRuntimeStateToPostgres(dbCache);
+    await syncStructuredTablesToPostgres(dbCache);
     return;
   }
 
@@ -230,10 +708,19 @@ async function saveDb(db: LocalStoryDb) {
 }
 
 async function withDbMutation<T>(mutate: (db: LocalStoryDb) => T | Promise<T>) {
-  const db = await ensureDbLoaded();
-  const result = await mutate(db);
-  await saveDb(db);
-  return result;
+  const runMutation = async () => {
+    const db = await ensureDbLoaded();
+    const result = await mutate(db);
+    await saveDb(db);
+    return result;
+  };
+
+  const queued = mutationQueue.then(runMutation, runMutation);
+  mutationQueue = queued.then(
+    () => undefined,
+    () => undefined,
+  );
+  return queued;
 }
 
 function groupByChronicleStates(db: LocalStoryDb, chronicleId: string) {
@@ -469,6 +956,248 @@ function normalizeActionNote(note: string | null | undefined) {
   return trimmed.slice(0, GUIDED_ACTION_TEXT_LIMIT);
 }
 
+function isInternalStateKey(key: string) {
+  return key.startsWith(INTERNAL_STATE_PREFIX);
+}
+
+function listPublicChronicleStates(db: LocalStoryDb, chronicleId: string) {
+  return groupByChronicleStates(db, chronicleId).filter(
+    (entry) => !isInternalStateKey(entry.stateKey),
+  );
+}
+
+function readChronicleStateValue(
+  db: LocalStoryDb,
+  chronicleId: string,
+  stateKey: string,
+) {
+  return db.chronicleWorldStateValues.find(
+    (entry) => entry.chronicleId === chronicleId && entry.stateKey === stateKey,
+  )?.stateValue;
+}
+
+function readChronicleStateString(
+  db: LocalStoryDb,
+  chronicleId: string,
+  stateKey: string,
+) {
+  const value = readChronicleStateValue(db, chronicleId, stateKey);
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function readChronicleStateNumber(
+  db: LocalStoryDb,
+  chronicleId: string,
+  stateKey: string,
+) {
+  const value = readChronicleStateValue(db, chronicleId, stateKey);
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function readChronicleStateBoolean(
+  db: LocalStoryDb,
+  chronicleId: string,
+  stateKey: string,
+) {
+  const value = readChronicleStateValue(db, chronicleId, stateKey);
+  return typeof value === "boolean" ? value : null;
+}
+
+function readChronicleStateStringList(
+  db: LocalStoryDb,
+  chronicleId: string,
+  stateKey: string,
+) {
+  const value = readChronicleStateValue(db, chronicleId, stateKey);
+  if (!Array.isArray(value)) {
+    return [] as string[];
+  }
+
+  return value
+    .map((item) => (typeof item === "string" ? item.trim() : ""))
+    .filter((item): item is string => Boolean(item));
+}
+
+function upsertChronicleInternalState(
+  db: LocalStoryDb,
+  chronicleId: string,
+  stateKey: string,
+  stateValue: JsonValue,
+) {
+  upsertChronicleState(db, chronicleId, stateKey, stateValue);
+}
+
+function computeStableHash(input: string) {
+  let hash = 0;
+  for (let index = 0; index < input.length; index += 1) {
+    hash = (hash * 31 + input.charCodeAt(index)) >>> 0;
+  }
+  return hash;
+}
+
+function derivePlannedChapterCount(seedInput: string) {
+  const hash = computeStableHash(seedInput);
+  return 4 + (hash % 4);
+}
+
+function inferChapterNumberFromLabel(chapterLabel: string | null) {
+  if (!chapterLabel) {
+    return null;
+  }
+
+  const match = chapterLabel.match(/(\d+)/);
+  if (!match) {
+    return null;
+  }
+
+  const parsed = Number.parseInt(match[1], 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return null;
+  }
+
+  return parsed;
+}
+
+function readBeatChapterNumber(beat: StoryBeatRecord) {
+  const metadataValue = beat.metadata["runtimeChapterNumber"];
+  if (typeof metadataValue === "number" && Number.isFinite(metadataValue) && metadataValue > 0) {
+    return Math.floor(metadataValue);
+  }
+
+  const fromLabel = inferChapterNumberFromLabel(beat.chapterLabel);
+  return fromLabel ?? 1;
+}
+
+function readBeatSceneIndex(beat: StoryBeatRecord) {
+  const metadataValue = beat.metadata["runtimeSceneIndex"];
+  if (typeof metadataValue === "number" && Number.isFinite(metadataValue) && metadataValue > 0) {
+    return Math.floor(metadataValue);
+  }
+
+  return 1;
+}
+
+function isProceduralChronicle(db: LocalStoryDb, chronicleId: string) {
+  return (
+    readChronicleStateString(db, chronicleId, CHRONICLE_RUNTIME_MODE_KEY) ===
+    CHRONICLE_MODE_PROCEDURAL
+  );
+}
+
+function hasCompletedRun(db: LocalStoryDb, chronicleId: string) {
+  return db.perspectiveRuns.some(
+    (run) => run.chronicleId === chronicleId && run.status === "completed",
+  );
+}
+
+function getChroniclePerspectiveUnlockState(db: LocalStoryDb, chronicleId: string) {
+  const primaryViewpointId = readChronicleStateString(
+    db,
+    chronicleId,
+    CHRONICLE_PRIMARY_VIEWPOINT_KEY,
+  );
+  const firstReadCompleteState = readChronicleStateBoolean(
+    db,
+    chronicleId,
+    CHRONICLE_FIRST_READ_COMPLETE_KEY,
+  );
+  const firstReadComplete =
+    firstReadCompleteState === true ? true : hasCompletedRun(db, chronicleId);
+
+  return {
+    primaryViewpointId,
+    firstReadComplete,
+  };
+}
+
+function getChronicleTotalChapterCount(db: LocalStoryDb, chronicleId: string) {
+  const raw = readChronicleStateNumber(db, chronicleId, CHRONICLE_TOTAL_CHAPTERS_KEY);
+  if (!raw) {
+    return null;
+  }
+
+  const normalized = Math.floor(raw);
+  if (normalized < 2) {
+    return 2;
+  }
+  if (normalized > 12) {
+    return 12;
+  }
+  return normalized;
+}
+
+function normalizeTextKey(value: string | null | undefined) {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed ? trimmed.toLowerCase() : null;
+}
+
+function trimTextToWordCount(text: string, maxWords = 170) {
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  if (words.length <= maxWords) {
+    return text.trim();
+  }
+
+  return `${words.slice(0, maxWords).join(" ")}...`;
+}
+
+function countWords(text: string | null | undefined) {
+  if (typeof text !== "string") {
+    return 0;
+  }
+
+  return text
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean).length;
+}
+
+function summarizeChapterText(text: string, maxWords = 65) {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return "Chapter draft in progress.";
+  }
+
+  const words = trimmed.split(/\s+/).filter(Boolean);
+  if (words.length <= maxWords) {
+    return trimmed;
+  }
+
+  return `${words.slice(0, maxWords).join(" ")}...`;
+}
+
+function localIdToUuid(scope: string, localId: string) {
+  const hash = createHash("sha1").update(`${scope}:${localId}`).digest("hex");
+  return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-5${hash.slice(13, 16)}-a${hash.slice(
+    17,
+    20,
+  )}-${hash.slice(20, 32)}`;
+}
+
+function mapLocalId(map: Map<string, string>, localId: string | null | undefined) {
+  if (!localId) {
+    return null;
+  }
+
+  return map.get(localId) ?? localIdToUuid("fallback", localId);
+}
+
+function asDate(value: string | null | undefined) {
+  if (!value) {
+    return new Date();
+  }
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return new Date();
+  }
+
+  return parsed;
+}
+
 function readMetadataString(metadata: Record<string, JsonValue>, key: string) {
   const value = metadata[key];
   if (typeof value !== "string") {
@@ -520,6 +1249,617 @@ function ensureUniqueCanonKey(
   }
 
   return candidate;
+}
+
+function buildRecentSceneProseContext(
+  db: LocalStoryDb,
+  input: {
+    perspectiveRunId: string;
+    chapterLabel: string | null;
+    maxScenes?: number;
+    excerptWordLimit?: number;
+  },
+) {
+  const maxScenes = input.maxScenes ?? 4;
+  const excerptWordLimit = input.excerptWordLimit ?? 170;
+  const runScenes = db.generatedScenes
+    .filter((scene) => scene.perspectiveRunId === input.perspectiveRunId)
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+
+  const targetChapterKey = normalizeTextKey(input.chapterLabel);
+  const chapterScenes = targetChapterKey
+    ? runScenes.filter((scene) => {
+        const sceneChapterLabel = readMetadataString(scene.metadata, "chapterLabel");
+        return normalizeTextKey(sceneChapterLabel) === targetChapterKey;
+      })
+    : runScenes;
+
+  const chapterAnchoredScenes = chapterScenes.slice(-maxScenes);
+  const selectedSceneIds = new Set(chapterAnchoredScenes.map((scene) => scene.id));
+  const supplementalScenes =
+    chapterAnchoredScenes.length < maxScenes
+      ? runScenes
+          .filter((scene) => !selectedSceneIds.has(scene.id))
+          .slice(-(maxScenes - chapterAnchoredScenes.length))
+      : [];
+  const continuityScenes = [...chapterAnchoredScenes, ...supplementalScenes].sort((a, b) =>
+    a.createdAt.localeCompare(b.createdAt),
+  );
+
+  const recentSceneProse = continuityScenes
+    .map((scene) => ({
+      sceneTitle: readMetadataString(scene.metadata, "sceneTitle"),
+      shortSummary: readMetadataString(scene.metadata, "shortSummary"),
+      chapterLabel: readMetadataString(scene.metadata, "chapterLabel"),
+      excerpt: trimTextToWordCount(scene.sceneText, excerptWordLimit),
+      createdAt: scene.createdAt,
+    }))
+    .filter((scene) => Boolean(scene.excerpt));
+
+  return {
+    routeSceneIndex: runScenes.length + 1,
+    chapterSceneIndex: chapterScenes.length + 1,
+    recentSceneProse,
+  };
+}
+
+function upsertChapterRecordForScene(
+  db: LocalStoryDb,
+  input: {
+    chronicle: ChronicleRecord;
+    run: PerspectiveRunRecord;
+    beat: StoryBeatRecord;
+    sceneId: string;
+    sceneText: string;
+    sourceLabel: string;
+  },
+) {
+  const chapterNumber = Math.max(1, readBeatChapterNumber(input.beat));
+  const chapterLabel = readOptionalString(input.beat.chapterLabel) ?? `Chapter ${chapterNumber}`;
+  const chapterLabelKey = normalizeTextKey(chapterLabel);
+
+  const chapterScenes = db.generatedScenes
+    .filter((scene) => {
+      if (scene.perspectiveRunId !== input.run.id) {
+        return false;
+      }
+
+      const sceneBeat = db.storyBeats.find((beat) => beat.id === scene.beatId);
+      if (sceneBeat) {
+        const sceneChapterNumber = readBeatChapterNumber(sceneBeat);
+        if (sceneChapterNumber === chapterNumber) {
+          return true;
+        }
+      }
+
+      if (!chapterLabelKey) {
+        return false;
+      }
+      const sceneChapterLabel = readMetadataString(scene.metadata, "chapterLabel");
+      return normalizeTextKey(sceneChapterLabel) === chapterLabelKey;
+    })
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+
+  const chapterText = chapterScenes
+    .map((scene) => scene.sceneText.trim())
+    .filter(Boolean)
+    .join("\n\n");
+  const sceneCount = chapterScenes.length;
+  const wordCount = countWords(chapterText);
+  const isReady = sceneCount >= MIN_CHAPTER_SCENES && wordCount >= MIN_CHAPTER_WORDS;
+  const latestScene = chapterScenes[chapterScenes.length - 1] ?? null;
+  const sceneTitle = latestScene
+    ? readMetadataString(latestScene.metadata, "sceneTitle")
+    : null;
+  const chapterTitle = sceneTitle
+    ? `${chapterLabel}: ${sceneTitle}`
+    : `${chapterLabel} Chronicle Draft`;
+  const chapterSummary = summarizeChapterText(chapterText, 75);
+  const sourceLabels = new Set(chapterScenes.map((scene) => scene.sourceLabel));
+  const chapterSourceLabel =
+    sourceLabels.size === 1 ? chapterScenes[0]?.sourceLabel ?? input.sourceLabel : "mixed";
+
+  const existing = db.storyChapters.find(
+    (chapter) =>
+      chapter.chronicleId === input.chronicle.id &&
+      chapter.perspectiveRunId === input.run.id &&
+      chapter.chapterNumber === chapterNumber,
+  );
+
+  const now = nowIso();
+  if (existing) {
+    existing.chapterLabel = chapterLabel;
+    existing.chapterTitle = chapterTitle;
+    existing.chapterSummary = chapterSummary;
+    existing.chapterText = chapterText;
+    existing.sceneCount = sceneCount;
+    existing.wordCount = wordCount;
+    existing.sourceLabel = chapterSourceLabel;
+    existing.isReady = isReady;
+    existing.metadata = {
+      ...existing.metadata,
+      latestSceneId: input.sceneId,
+      latestBeatId: input.beat.id,
+      minChapterWords: MIN_CHAPTER_WORDS,
+      minChapterScenes: MIN_CHAPTER_SCENES,
+      sourceLabels: Array.from(sourceLabels),
+    };
+    existing.updatedAt = now;
+    return;
+  }
+
+  const chapter: StoryChapterRecord = {
+    id: createId("chapter"),
+    chronicleId: input.chronicle.id,
+    perspectiveRunId: input.run.id,
+    chapterNumber,
+    chapterLabel,
+    chapterTitle,
+    chapterSummary,
+    chapterText,
+    sceneCount,
+    wordCount,
+    sourceLabel: chapterSourceLabel,
+    isReady,
+    metadata: {
+      latestSceneId: input.sceneId,
+      latestBeatId: input.beat.id,
+      minChapterWords: MIN_CHAPTER_WORDS,
+      minChapterScenes: MIN_CHAPTER_SCENES,
+      sourceLabels: Array.from(sourceLabels),
+    },
+    createdAt: now,
+    updatedAt: now,
+  };
+  db.storyChapters.push(chapter);
+}
+
+function rebuildStoryChaptersFromGeneratedScenes(db: LocalStoryDb) {
+  db.storyChapters = [];
+  const scenes = db.generatedScenes.slice().sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  for (const scene of scenes) {
+    const chronicle = db.chronicles.find((entry) => entry.id === scene.chronicleId);
+    const run = db.perspectiveRuns.find((entry) => entry.id === scene.perspectiveRunId);
+    const beat = db.storyBeats.find((entry) => entry.id === scene.beatId);
+    if (!chronicle || !run || !beat) {
+      continue;
+    }
+
+    upsertChapterRecordForScene(db, {
+      chronicle,
+      run,
+      beat,
+      sceneId: scene.id,
+      sceneText: scene.sceneText,
+      sourceLabel: scene.sourceLabel,
+    });
+  }
+}
+
+function getLatestSceneForBeat(
+  db: LocalStoryDb,
+  input: { perspectiveRunId: string; beatId: string },
+) {
+  const scene = db.generatedScenes
+    .filter(
+      (entry) =>
+        entry.perspectiveRunId === input.perspectiveRunId && entry.beatId === input.beatId,
+    )
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+
+  return scene ?? null;
+}
+
+function normalizeIntentTags(tags: string[], fallbackText: string) {
+  const normalized = Array.from(
+    new Set(
+      tags
+        .map((tag) => tag.trim().toLowerCase())
+        .filter(Boolean),
+    ),
+  ).slice(0, 6);
+
+  if (normalized.length) {
+    return normalized;
+  }
+
+  const fallbackTokens = fallbackText
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((token) => token.length > 3)
+    .slice(0, 3);
+  if (fallbackTokens.length) {
+    return fallbackTokens;
+  }
+
+  return ["investigate", "observe"];
+}
+
+function trimForSlug(value: string, maxLength = 42) {
+  const slug = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, maxLength);
+  return slug || "scene";
+}
+
+function nextOrderIndex(values: number[], startAt = 10) {
+  if (!values.length) {
+    return startAt;
+  }
+
+  return Math.max(...values) + 10;
+}
+
+function nextChoiceOrderIndex(
+  db: LocalStoryDb,
+  beatId: string,
+  fallbackStart = 1,
+) {
+  const values = db.beatChoices
+    .filter((choice) => choice.beatId === beatId)
+    .map((choice) => choice.orderIndex);
+  if (!values.length) {
+    return fallbackStart;
+  }
+
+  return Math.max(...values) + 1;
+}
+
+function toPublicGlobalStateForGeneration(db: LocalStoryDb, chronicleId: string) {
+  return listPublicChronicleStates(db, chronicleId).map((entry) => ({
+    key: entry.stateKey,
+    value: entry.stateValue,
+  }));
+}
+
+function getChronicleCanonEntriesForGeneration(
+  db: LocalStoryDb,
+  input: { chronicle: ChronicleRecord },
+) {
+  return db.storyCanonEntries
+    .filter((entry) => {
+      if (entry.versionId !== input.chronicle.versionId) {
+        return false;
+      }
+
+      const origin = readMetadataString(entry.metadata, "origin");
+      if (origin !== "ai_emergent_locked") {
+        return true;
+      }
+
+      return (
+        readMetadataString(entry.metadata, "sourceChronicleId") === input.chronicle.id
+      );
+    })
+    .sort((a, b) => a.title.localeCompare(b.title))
+    .map((entry) => ({
+      canonKey: entry.canonKey,
+      entryType: entry.entryType,
+      title: entry.title,
+      body: entry.body,
+    }));
+}
+
+function ensureChronicleProceduralPlan(
+  db: LocalStoryDb,
+  input: {
+    chronicle: ChronicleRecord;
+    world: { title: string };
+    version: { versionLabel: string };
+  },
+) {
+  if (!isProceduralChronicle(db, input.chronicle.id)) {
+    return;
+  }
+
+  if (getChronicleTotalChapterCount(db, input.chronicle.id)) {
+    return;
+  }
+
+  const plannedChapterCount = derivePlannedChapterCount(
+    `${input.chronicle.id}|${input.world.title}|${input.version.versionLabel}`,
+  );
+  const chapterTitles = Array.from({ length: plannedChapterCount }, (_, index) => {
+    return `Chapter ${index + 1}`;
+  });
+
+  upsertChronicleInternalState(
+    db,
+    input.chronicle.id,
+    CHRONICLE_TOTAL_CHAPTERS_KEY,
+    plannedChapterCount,
+  );
+  upsertChronicleInternalState(
+    db,
+    input.chronicle.id,
+    CHRONICLE_CHAPTER_TITLES_KEY,
+    chapterTitles,
+  );
+
+  addCanonicalEvent(db, {
+    chronicleId: input.chronicle.id,
+    eventType: "system",
+    summary: `Chronicle plan committed: ${plannedChapterCount} chapters.`,
+    payload: {
+      totalChapters: plannedChapterCount,
+      planMode: "seeded_procedural",
+    },
+  });
+}
+
+async function ensureProceduralChoicesForBeat(
+  db: LocalStoryDb,
+  input: {
+    chronicle: ChronicleRecord;
+    run: PerspectiveRunRecord;
+    world: { title: string; tone: string; synopsis: string };
+    version: { versionLabel: string };
+    viewpoint: { label: string };
+    character: { name: string; summary: string };
+    beat: StoryBeatRecord;
+  },
+) {
+  if (!isProceduralChronicle(db, input.chronicle.id)) {
+    return;
+  }
+  if (input.beat.isTerminal) {
+    return;
+  }
+
+  const allChoicesForBeat = db.beatChoices.filter((choice) => choice.beatId === input.beat.id);
+  const runtimeChoices = allChoicesForBeat.filter(
+    (choice) => readMetadataString(choice.metadata, "origin") === "ai_runtime",
+  );
+  if (runtimeChoices.length >= 2) {
+    return;
+  }
+
+  const totalChapters = getChronicleTotalChapterCount(db, input.chronicle.id) ?? 5;
+  const chapterTitles = readChronicleStateStringList(
+    db,
+    input.chronicle.id,
+    CHRONICLE_CHAPTER_TITLES_KEY,
+  );
+  const currentChapter = Math.min(
+    Math.max(1, readBeatChapterNumber(input.beat)),
+    totalChapters,
+  );
+  const latestScene =
+    getLatestSceneForBeat(db, {
+      perspectiveRunId: input.run.id,
+      beatId: input.beat.id,
+    }) ?? null;
+
+  const canonEntries = getChronicleCanonEntriesForGeneration(db, {
+    chronicle: input.chronicle,
+  });
+  const globalState = toPublicGlobalStateForGeneration(db, input.chronicle.id);
+  const perspectiveState = groupByPerspectiveState(db, input.run.id).map((entry) => ({
+    key: entry.stateKey,
+    value: entry.stateValue,
+  }));
+  const knowledgeState = groupByPerspectiveKnowledge(db, input.run.id).map((entry) => ({
+    key: entry.flagKey,
+    status: entry.status,
+  }));
+  const recentEvents = db.canonicalEventLog
+    .filter((event) => event.chronicleId === input.chronicle.id)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    .slice(0, 8)
+    .map((event) => ({
+      eventType: event.eventType,
+      summary: event.summary,
+    }));
+  const continuityContext = buildRecentSceneProseContext(db, {
+    perspectiveRunId: input.run.id,
+    chapterLabel: input.beat.chapterLabel,
+    maxScenes: 2,
+    excerptWordLimit: 90,
+  });
+  const activeChapter =
+    db.storyChapters.find(
+      (chapter) =>
+        chapter.perspectiveRunId === input.run.id && chapter.chapterNumber === currentChapter,
+    ) ?? null;
+  const chapterSceneCount = activeChapter?.sceneCount ?? 0;
+  const chapterWordCount = activeChapter?.wordCount ?? 0;
+  const branchGeneration = await generateNarrativeBranch({
+    worldTitle: input.world.title,
+    worldTone: input.world.tone,
+    worldSynopsis: input.world.synopsis,
+    versionLabel: input.version.versionLabel,
+    viewpointLabel: input.viewpoint.label,
+    characterName: input.character.name,
+    characterSummary: input.character.summary,
+    beatTitle: input.beat.title,
+    beatSummary: input.beat.summary,
+    beatNarration: latestScene?.sceneText ?? input.beat.narration,
+    beatType: input.beat.beatType,
+    chapterLabel: input.beat.chapterLabel,
+    chapterNumber: currentChapter,
+    totalChapterCount: totalChapters,
+    chapterSceneCount,
+    chapterWordCount,
+    minChapterSceneCount: MIN_CHAPTER_SCENES,
+    minChapterWordCount: MIN_CHAPTER_WORDS,
+    routeSceneIndex: Math.max(1, continuityContext.routeSceneIndex),
+    canonEntries,
+    globalState,
+    perspectiveState,
+    knowledgeState,
+    recentEvents,
+    recentSceneProse: continuityContext.recentSceneProse,
+  });
+
+  const branchChoices = branchGeneration.payload.choices;
+  if (branchChoices.length < 2) {
+    return;
+  }
+
+  const maxBeatOrder = nextOrderIndex(db.storyBeats.map((beat) => beat.orderIndex));
+  const chapterTitleForCurrent =
+    branchGeneration.payload.chapterTitle ??
+    chapterTitles[currentChapter - 1] ??
+    `Chapter ${currentChapter}`;
+
+  input.beat.chapterLabel = chapterTitleForCurrent;
+  input.beat.metadata = {
+    ...input.beat.metadata,
+    runtimeChapterNumber: currentChapter,
+    runtimeSceneIndex: readBeatSceneIndex(input.beat),
+    runtimeGeneratedChoices: true,
+    runtimeChapterSceneCount: chapterSceneCount,
+    runtimeChapterWordCount: chapterWordCount,
+    runtimeChapterReadyForAdvance:
+      chapterSceneCount >= MIN_CHAPTER_SCENES && chapterWordCount >= MIN_CHAPTER_WORDS,
+    runtimeBranchSource: branchGeneration.sourceLabel,
+    runtimeBranchModel: branchGeneration.model ?? null,
+    runtimeBranchFallbackReason: branchGeneration.fallbackReason ?? null,
+  };
+  input.beat.updatedAt = nowIso();
+
+  const createdChoiceIds: string[] = [];
+  let beatOrderCursor = maxBeatOrder;
+  let choiceOrderCursor = nextChoiceOrderIndex(db, input.beat.id);
+
+  for (const branchChoice of branchChoices) {
+    let nextChapterNumber = currentChapter;
+    const directive = branchChoice.chapterDirective ?? "stay";
+    if (directive === "advance") {
+      nextChapterNumber = Math.min(totalChapters, currentChapter + 1);
+    } else if (directive === "finale") {
+      nextChapterNumber = totalChapters;
+    }
+    if (currentChapter >= totalChapters) {
+      nextChapterNumber = totalChapters;
+    }
+
+    const nextIsTerminal =
+      currentChapter >= totalChapters || directive === "finale";
+    const nextChapterLabel =
+      chapterTitles[nextChapterNumber - 1] ??
+      `Chapter ${nextChapterNumber}`;
+    const beatId = createId("beat");
+    beatOrderCursor += 10;
+
+    const nextBeat: StoryBeatRecord = {
+      id: beatId,
+      versionId: input.chronicle.versionId,
+      slug: `runtime-${trimForSlug(input.chronicle.id, 20)}-${trimForSlug(branchChoice.nextBeatTitle, 28)}-${beatId.slice(-6)}`,
+      title: branchChoice.nextBeatTitle,
+      sceneSubtitle: null,
+      chapterLabel: nextChapterLabel,
+      summary: branchChoice.nextBeatSummary,
+      narration: branchChoice.nextBeatSummary,
+      atmosphere: branchChoice.nextBeatAtmosphere ?? null,
+      allowsGuidedAction: !nextIsTerminal,
+      guidedActionPrompt: !nextIsTerminal
+        ? "Type a short intent to flavor this route choice while staying on canon rails."
+        : null,
+      allowedActionTags: normalizeIntentTags(
+        branchChoice.intentTags,
+        `${branchChoice.label} ${branchChoice.description}`,
+      ),
+      fallbackChoiceId: null,
+      beatType: input.beat.beatType,
+      orderIndex: beatOrderCursor,
+      isTerminal: nextIsTerminal,
+      metadata: {
+        origin: "ai_runtime",
+        generatedFromBeatId: input.beat.id,
+        generatedFromRunId: input.run.id,
+        generatedFromChronicleId: input.chronicle.id,
+        runtimeChapterNumber: nextChapterNumber,
+        runtimeSceneIndex: readBeatSceneIndex(input.beat) + 1,
+        branchDirective: directive,
+        branchSource: branchGeneration.sourceLabel,
+        branchModel: branchGeneration.model ?? null,
+      },
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    };
+    db.storyBeats.push(nextBeat);
+
+    const choiceId = createId("choice");
+    const choice: BeatChoiceRecord = {
+      id: choiceId,
+      beatId: input.beat.id,
+      label: branchChoice.label,
+      internalKey: `runtime_${trimForSlug(branchChoice.label, 32)}`,
+      description: branchChoice.description,
+      orderIndex: choiceOrderCursor,
+      nextBeatId: nextBeat.id,
+      intentTags: normalizeIntentTags(
+        branchChoice.intentTags,
+        `${branchChoice.label} ${branchChoice.description}`,
+      ),
+      consequenceScope: "perspective",
+      gatingRules: [],
+      consequences: [
+        {
+          scope: "perspective",
+          key: "route_last_choice",
+          value: branchChoice.label,
+        },
+        {
+          scope: "perspective",
+          key: "route_last_choice_tag",
+          value:
+            normalizeIntentTags(
+              branchChoice.intentTags,
+              `${branchChoice.label} ${branchChoice.description}`,
+            )[0] ?? "observe",
+        },
+      ],
+      metadata: {
+        origin: "ai_runtime",
+        branchDirective: directive,
+        branchSource: branchGeneration.sourceLabel,
+        branchModel: branchGeneration.model ?? null,
+        branchFallbackReason: branchGeneration.fallbackReason ?? null,
+      },
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    };
+    db.beatChoices.push(choice);
+    createdChoiceIds.push(choiceId);
+    choiceOrderCursor += 1;
+  }
+
+  if (createdChoiceIds.length) {
+    input.beat.fallbackChoiceId = createdChoiceIds[0];
+    input.beat.allowedActionTags = Array.from(
+      new Set(
+        db.beatChoices
+          .filter((choice) => createdChoiceIds.includes(choice.id))
+          .flatMap((choice) => choice.intentTags),
+      ),
+    ).slice(0, 8);
+  }
+
+  addCanonicalEvent(db, {
+    chronicleId: input.chronicle.id,
+    perspectiveRunId: input.run.id,
+    beatId: input.beat.id,
+    eventType: "route_change",
+    summary: `Runtime branch committed with ${createdChoiceIds.length} choices.`,
+    payload: {
+      choiceCount: createdChoiceIds.length,
+      branchSource: branchGeneration.sourceLabel,
+      branchModel: branchGeneration.model ?? null,
+      branchFallbackReason: branchGeneration.fallbackReason ?? null,
+      chapterNumber: currentChapter,
+      chapterSceneCount,
+      chapterWordCount,
+      chapterReadyForAdvance:
+        chapterSceneCount >= MIN_CHAPTER_SCENES && chapterWordCount >= MIN_CHAPTER_WORDS,
+      totalChapters,
+    },
+  });
 }
 
 function lockEmergentCanonCandidates(
@@ -653,32 +1993,10 @@ async function addGeneratedScene(
     resolutionSource: "run_start" | "explicit_choice" | "guided_action";
   },
 ) {
-  const canonEntries = db.storyCanonEntries
-    .filter((entry) => {
-      if (entry.versionId !== input.chronicle.versionId) {
-        return false;
-      }
-
-      const origin = readMetadataString(entry.metadata, "origin");
-      if (origin !== "ai_emergent_locked") {
-        return true;
-      }
-
-      return (
-        readMetadataString(entry.metadata, "sourceChronicleId") === input.chronicle.id
-      );
-    })
-    .sort((a, b) => a.title.localeCompare(b.title))
-    .map((entry) => ({
-      canonKey: entry.canonKey,
-      entryType: entry.entryType,
-      title: entry.title,
-      body: entry.body,
-    }));
-  const globalState = groupByChronicleStates(db, input.chronicle.id).map((entry) => ({
-    key: entry.stateKey,
-    value: entry.stateValue,
-  }));
+  const canonEntries = getChronicleCanonEntriesForGeneration(db, {
+    chronicle: input.chronicle,
+  });
+  const globalState = toPublicGlobalStateForGeneration(db, input.chronicle.id);
   const perspectiveState = groupByPerspectiveState(db, input.run.id).map((entry) => ({
     key: entry.stateKey,
     value: entry.stateValue,
@@ -703,6 +2021,10 @@ async function addGeneratedScene(
     label: choice.label,
     description: choice.description,
   }));
+  const continuityContext = buildRecentSceneProseContext(db, {
+    perspectiveRunId: input.run.id,
+    chapterLabel: input.beat.chapterLabel,
+  });
 
   const generation = await generateNarrativeScene({
     worldTitle: input.worldTitle,
@@ -728,6 +2050,9 @@ async function addGeneratedScene(
     knowledgeState,
     recentEvents,
     availableChoices,
+    recentSceneProse: continuityContext.recentSceneProse,
+    chapterSceneIndex: continuityContext.chapterSceneIndex,
+    routeSceneIndex: continuityContext.routeSceneIndex,
   });
 
   const sceneMetadata: Record<string, JsonValue> = {
@@ -740,6 +2065,9 @@ async function addGeneratedScene(
     resolutionSource: input.resolutionSource,
     beatType: input.beat.beatType,
     chapterLabel: input.beat.chapterLabel,
+    chapterSceneIndex: continuityContext.chapterSceneIndex,
+    routeSceneIndex: continuityContext.routeSceneIndex,
+    recentSceneContextCount: continuityContext.recentSceneProse.length,
   };
 
   const sceneRecord = {
@@ -753,6 +2081,15 @@ async function addGeneratedScene(
     createdAt: nowIso(),
   };
   db.generatedScenes.push(sceneRecord);
+
+  upsertChapterRecordForScene(db, {
+    chronicle: input.chronicle,
+    run: input.run,
+    beat: input.beat,
+    sceneId: sceneRecord.id,
+    sceneText: sceneRecord.sceneText,
+    sourceLabel: sceneRecord.sourceLabel,
+  });
 
   const lockedCanonCount = lockEmergentCanonCandidates(db, {
     chronicle: input.chronicle,
@@ -780,10 +2117,18 @@ function listAvailableChoicesForBeat(
   const globalState = toStateMap(groupByChronicleStates(db, input.chronicleId));
   const perspectiveState = toStateMap(groupByPerspectiveState(db, input.runId));
   const knowledgeState = toKnowledgeMap(groupByPerspectiveKnowledge(db, input.runId));
-
-  return db.beatChoices
+  const choicesForBeat = db.beatChoices
     .filter((choice) => choice.beatId === input.beatId)
-    .sort((a, b) => a.orderIndex - b.orderIndex)
+    .sort((a, b) => a.orderIndex - b.orderIndex);
+  const runtimeChoices = choicesForBeat.filter(
+    (choice) => readMetadataString(choice.metadata, "origin") === "ai_runtime",
+  );
+  const sourceChoices =
+    isProceduralChronicle(db, input.chronicleId) && runtimeChoices.length
+      ? runtimeChoices
+      : choicesForBeat;
+
+  return sourceChoices
     .filter((choice) =>
       choiceIsAvailable(choice, globalState, perspectiveState, knowledgeState),
     );
@@ -882,6 +2227,42 @@ async function applyChoiceTransition(
       input.resolutionSource === "guided_action" ? "guided_action" : "explicit_choice",
   });
 
+  if (input.run.status === "completed") {
+    const unlockState = getChroniclePerspectiveUnlockState(db, input.chronicle.id);
+    if (!unlockState.firstReadComplete) {
+      upsertChronicleInternalState(
+        db,
+        input.chronicle.id,
+        CHRONICLE_FIRST_READ_COMPLETE_KEY,
+        true,
+      );
+      upsertChronicleInternalState(
+        db,
+        input.chronicle.id,
+        CHRONICLE_FIRST_COMPLETED_RUN_KEY,
+        input.run.id,
+      );
+      addCanonicalEvent(db, {
+        chronicleId: input.chronicle.id,
+        perspectiveRunId: input.run.id,
+        beatId: nextBeat.id,
+        eventType: "system",
+        summary:
+          "First full perspective run completed. Additional viewpoints are now unlocked.",
+      });
+    }
+  } else {
+    await ensureProceduralChoicesForBeat(db, {
+      chronicle: input.chronicle,
+      run: input.run,
+      world: input.world,
+      version: input.version,
+      viewpoint: input.viewpoint,
+      character: input.character,
+      beat: nextBeat,
+    });
+  }
+
   return {
     runId: input.run.id,
     chronicleId: input.chronicle.id,
@@ -954,6 +2335,17 @@ function assertPerspectiveRunForUser(
 
 export async function ensureLocalStoryDb() {
   await ensureDbLoaded();
+}
+
+export async function resyncStructuredStoryProjection() {
+  return withDbMutation((db) => ({
+    chronicles: db.chronicles.length,
+    runs: db.perspectiveRuns.length,
+    beats: db.storyBeats.length,
+    choices: db.beatChoices.length,
+    chapters: db.storyChapters.length,
+    scenes: db.generatedScenes.length,
+  }));
 }
 
 export async function listReaderWorldCards(): Promise<ReaderWorldCard[]> {
@@ -1035,6 +2427,19 @@ export async function createChronicleForUser(input: {
     };
     db.chronicles.push(chronicle);
 
+    upsertChronicleInternalState(
+      db,
+      chronicle.id,
+      CHRONICLE_RUNTIME_MODE_KEY,
+      CHRONICLE_MODE_PROCEDURAL,
+    );
+    upsertChronicleInternalState(
+      db,
+      chronicle.id,
+      CHRONICLE_FIRST_READ_COMPLETE_KEY,
+      false,
+    );
+
     addCanonicalEvent(db, {
       chronicleId: chronicle.id,
       eventType: "system",
@@ -1062,12 +2467,30 @@ export async function listChronicleSummariesForUser(
       const version = db.storyVersions.find((entry) => entry.id === chronicle.versionId);
       if (!world || !version) return null;
 
-      const viewpointCount = db.playableViewpoints.filter(
+      const fullViewpointCount = db.playableViewpoints.filter(
         (viewpoint) => viewpoint.versionId === version.id && viewpoint.isPlayable,
       ).length;
+      const unlockState = getChroniclePerspectiveUnlockState(db, chronicle.id);
+      const firstPlayableViewpointId = db.playableViewpoints
+        .filter((viewpoint) => viewpoint.versionId === version.id && viewpoint.isPlayable)
+        .sort((a, b) => a.orderIndex - b.orderIndex)[0]?.id;
+      const visibleViewpointId =
+        unlockState.primaryViewpointId ?? firstPlayableViewpointId ?? null;
+      const viewpointCount = unlockState.firstReadComplete
+        ? fullViewpointCount
+        : Math.min(1, fullViewpointCount);
 
       const runs = db.perspectiveRuns
-        .filter((run) => run.chronicleId === chronicle.id)
+        .filter((run) => {
+          if (run.chronicleId !== chronicle.id) {
+            return false;
+          }
+          if (unlockState.firstReadComplete) {
+            return true;
+          }
+
+          return run.viewpointId === visibleViewpointId;
+        })
         .map((run) => {
           const viewpoint = db.playableViewpoints.find(
             (entry) => entry.id === run.viewpointId,
@@ -1090,7 +2513,7 @@ export async function listChronicleSummariesForUser(
       const completedRunCount = runs.filter(
         (entry) => entry.run.status === "completed",
       ).length;
-      const worldStateCount = groupByChronicleStates(db, chronicle.id).length;
+      const worldStateCount = listPublicChronicleStates(db, chronicle.id).length;
       const recentEvents = db.canonicalEventLog
         .filter((event) => event.chronicleId === chronicle.id)
         .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
@@ -1118,10 +2541,26 @@ export async function getChronicleByIdForUser(input: {
   const chronicle = assertChronicleForUser(db, input.chronicleId, input.userId);
   const world = assertWorldExists(db, chronicle.worldId);
   const version = assertVersionExists(db, chronicle.versionId);
+  const unlockState = getChroniclePerspectiveUnlockState(db, chronicle.id);
+  const chronicleViewpoints = db.playableViewpoints
+    .filter((viewpoint) => viewpoint.versionId === chronicle.versionId && viewpoint.isPlayable)
+    .sort((a, b) => a.orderIndex - b.orderIndex);
+  const defaultRevealedViewpointId = chronicleViewpoints[0]?.id ?? null;
+  const revealedViewpointId =
+    unlockState.primaryViewpointId ?? defaultRevealedViewpointId;
 
-  const worldState = groupByChronicleStates(db, chronicle.id);
+  const worldState = listPublicChronicleStates(db, chronicle.id);
   const runs = db.perspectiveRuns
-    .filter((run) => run.chronicleId === chronicle.id)
+    .filter((run) => {
+      if (run.chronicleId !== chronicle.id) {
+        return false;
+      }
+      if (unlockState.firstReadComplete) {
+        return true;
+      }
+
+      return run.viewpointId === revealedViewpointId;
+    })
     .map((run) => {
       const viewpoint = db.playableViewpoints.find(
         (entry) => entry.id === run.viewpointId,
@@ -1137,9 +2576,15 @@ export async function getChronicleByIdForUser(input: {
     .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry))
     .sort((a, b) => b.run.lastActiveAt.localeCompare(a.run.lastActiveAt));
 
-  const viewpointProgress = db.playableViewpoints
-    .filter((viewpoint) => viewpoint.versionId === chronicle.versionId && viewpoint.isPlayable)
-    .sort((a, b) => a.orderIndex - b.orderIndex)
+  const revealedViewpoints = chronicleViewpoints.filter((viewpoint) => {
+    if (unlockState.firstReadComplete) {
+      return true;
+    }
+
+    return viewpoint.id === revealedViewpointId;
+  });
+
+  const viewpointProgress = revealedViewpoints
     .map((viewpoint) => {
       const character = db.storyCharacters.find((entry) => entry.id === viewpoint.characterId);
       if (!character) {
@@ -1160,6 +2605,7 @@ export async function getChronicleByIdForUser(input: {
     .filter((event) => event.chronicleId === chronicle.id)
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
     .slice(0, 12);
+  const totalChapterCount = getChronicleTotalChapterCount(db, chronicle.id);
 
   return {
     chronicle,
@@ -1169,6 +2615,11 @@ export async function getChronicleByIdForUser(input: {
     runs,
     viewpointProgress,
     recentEvents,
+    unlockState: {
+      firstReadComplete: unlockState.firstReadComplete,
+      totalChapterCount,
+      primaryViewpointId: unlockState.primaryViewpointId,
+    },
   };
 }
 
@@ -1197,6 +2648,45 @@ export async function createPerspectiveRunForUser(input: {
       return existing;
     }
 
+    const unlockState = getChroniclePerspectiveUnlockState(db, chronicle.id);
+    const firstPlayableViewpointId = db.playableViewpoints
+      .filter((entry) => entry.versionId === chronicle.versionId && entry.isPlayable)
+      .sort((a, b) => a.orderIndex - b.orderIndex)[0]?.id;
+    if (
+      !unlockState.firstReadComplete &&
+      unlockState.primaryViewpointId &&
+      unlockState.primaryViewpointId !== viewpoint.id
+    ) {
+      throw new Error(
+        "Additional viewpoints unlock after your first full perspective read-through.",
+      );
+    }
+    if (
+      !unlockState.firstReadComplete &&
+      !unlockState.primaryViewpointId &&
+      firstPlayableViewpointId &&
+      viewpoint.id !== firstPlayableViewpointId
+    ) {
+      throw new Error(
+        "This perspective remains hidden until the first Chronicle read-through is complete.",
+      );
+    }
+
+    if (!unlockState.firstReadComplete && !unlockState.primaryViewpointId) {
+      upsertChronicleInternalState(
+        db,
+        chronicle.id,
+        CHRONICLE_PRIMARY_VIEWPOINT_KEY,
+        viewpoint.id,
+      );
+    }
+
+    ensureChronicleProceduralPlan(db, {
+      chronicle,
+      world,
+      version,
+    });
+
     const startBeat =
       (viewpoint.startBeatId
         ? db.storyBeats.find((beat) => beat.id === viewpoint.startBeatId)
@@ -1209,11 +2699,51 @@ export async function createPerspectiveRunForUser(input: {
       throw new Error("No starting beat exists for this viewpoint.");
     }
 
+    const isProcedural = isProceduralChronicle(db, chronicle.id);
+    let runStartBeat = startBeat;
+    if (isProcedural) {
+      const chapterTitles = readChronicleStateStringList(
+        db,
+        chronicle.id,
+        CHRONICLE_CHAPTER_TITLES_KEY,
+      );
+      const openingChapterLabel = chapterTitles[0] ?? "Chapter 1";
+      const runtimeBeatId = createId("beat");
+      const runtimeOpeningBeat: StoryBeatRecord = {
+        ...startBeat,
+        id: runtimeBeatId,
+        slug: `runtime-open-${trimForSlug(chronicle.id, 16)}-${runtimeBeatId.slice(-6)}`,
+        chapterLabel: openingChapterLabel,
+        allowsGuidedAction: true,
+        guidedActionPrompt:
+          startBeat.guidedActionPrompt ??
+          "Type a short intent and Inkbranch will map it to a committed route choice.",
+        allowedActionTags: startBeat.allowedActionTags.length
+          ? startBeat.allowedActionTags
+          : ["investigate", "observe", "secure"],
+        fallbackChoiceId: null,
+        orderIndex: nextOrderIndex(db.storyBeats.map((beat) => beat.orderIndex)),
+        metadata: {
+          ...startBeat.metadata,
+          origin: "ai_runtime_opening",
+          generatedFromBeatId: startBeat.id,
+          generatedFromChronicleId: chronicle.id,
+          generatedFromRunId: null,
+          runtimeChapterNumber: 1,
+          runtimeSceneIndex: 1,
+        },
+        createdAt: nowIso(),
+        updatedAt: nowIso(),
+      };
+      db.storyBeats.push(runtimeOpeningBeat);
+      runStartBeat = runtimeOpeningBeat;
+    }
+
     const run: PerspectiveRunRecord = {
       id: createId("run"),
       chronicleId: chronicle.id,
       viewpointId: viewpoint.id,
-      currentBeatId: startBeat.id,
+      currentBeatId: runStartBeat.id,
       status: "active",
       summary: null,
       startedAt: nowIso(),
@@ -1221,6 +2751,14 @@ export async function createPerspectiveRunForUser(input: {
       completedAt: null,
     };
     db.perspectiveRuns.push(run);
+
+    if (isProcedural) {
+      runStartBeat.metadata = {
+        ...runStartBeat.metadata,
+        generatedFromRunId: run.id,
+      };
+      runStartBeat.updatedAt = nowIso();
+    }
 
     upsertPerspectiveState(db, run.id, "viewpoint_label", viewpoint.label);
 
@@ -1233,15 +2771,25 @@ export async function createPerspectiveRunForUser(input: {
       versionLabel: version.versionLabel,
       characterName: character.name,
       characterSummary: character.summary,
-      beat: startBeat,
+      beat: runStartBeat,
       viewpointLabel: viewpoint.label,
       resolutionSource: "run_start",
+    });
+
+    await ensureProceduralChoicesForBeat(db, {
+      chronicle,
+      run,
+      world,
+      version,
+      viewpoint,
+      character,
+      beat: runStartBeat,
     });
 
     addCanonicalEvent(db, {
       chronicleId: chronicle.id,
       perspectiveRunId: run.id,
-      beatId: startBeat.id,
+      beatId: runStartBeat.id,
       eventType: "route_change",
       summary: `Perspective run started: ${viewpoint.label}.`,
       payload: { viewpointId: viewpoint.id },
@@ -1252,12 +2800,14 @@ export async function createPerspectiveRunForUser(input: {
   });
 }
 
-export async function getPerspectiveRunContextForUser(input: {
-  userId: string;
-  chronicleId: string;
-  runId: string;
-}) {
-  const db = await ensureDbLoaded();
+function buildPerspectiveRunContextSnapshot(
+  db: LocalStoryDb,
+  input: {
+    userId: string;
+    chronicleId: string;
+    runId: string;
+  },
+) {
   const { chronicle, run } = assertPerspectiveRunForUser(db, input);
   const world = assertWorldExists(db, chronicle.worldId);
   const version = assertVersionExists(db, chronicle.versionId);
@@ -1268,22 +2818,28 @@ export async function getPerspectiveRunContextForUser(input: {
   }
 
   const beat = assertBeatExists(db, run.currentBeatId);
-  const globalStateEntries = groupByChronicleStates(db, chronicle.id);
-  const perspectiveStateEntries = groupByPerspectiveState(db, run.id);
-  const knowledgeEntries = groupByPerspectiveKnowledge(db, run.id);
-
-  const availableChoices = listAvailableChoicesForBeat(db, {
+  const choices = listAvailableChoicesForBeat(db, {
     beatId: beat.id,
     chronicleId: chronicle.id,
     runId: run.id,
   });
+  const globalStateEntries = listPublicChronicleStates(db, chronicle.id);
+  const perspectiveStateEntries = groupByPerspectiveState(db, run.id);
+  const knowledgeEntries = groupByPerspectiveKnowledge(db, run.id);
+  const unlockState = getChroniclePerspectiveUnlockState(db, chronicle.id);
 
   const sceneHistory = db.generatedScenes
     .filter((scene) => scene.perspectiveRunId === run.id)
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 
   const otherRuns = db.perspectiveRuns
-    .filter((otherRun) => otherRun.chronicleId === chronicle.id && otherRun.id !== run.id)
+    .filter((otherRun) => {
+      if (otherRun.chronicleId !== chronicle.id || otherRun.id === run.id) {
+        return false;
+      }
+
+      return unlockState.firstReadComplete;
+    })
     .map((otherRun) => {
       const otherViewpoint = db.playableViewpoints.find(
         (entry) => entry.id === otherRun.viewpointId,
@@ -1308,6 +2864,12 @@ export async function getPerspectiveRunContextForUser(input: {
     .filter((event) => event.chronicleId === chronicle.id)
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
     .slice(0, 8);
+  const totalChapterCount = getChronicleTotalChapterCount(db, chronicle.id);
+  const activeChapter = db.storyChapters.find(
+    (chapter) =>
+      chapter.perspectiveRunId === run.id &&
+      chapter.chapterNumber === readBeatChapterNumber(beat),
+  );
 
   return {
     chronicle,
@@ -1317,14 +2879,74 @@ export async function getPerspectiveRunContextForUser(input: {
     viewpoint,
     character,
     beat,
-    choices: availableChoices,
+    choices,
     globalStateEntries,
     perspectiveStateEntries,
     knowledgeEntries,
     sceneHistory,
     otherRuns,
     recentChronicleEvents,
+    bookPlan: {
+      totalChapterCount,
+      currentChapterNumber: readBeatChapterNumber(beat),
+      currentSceneIndex: readBeatSceneIndex(beat),
+      firstReadComplete: unlockState.firstReadComplete,
+      chapterWordCount: activeChapter?.wordCount ?? null,
+      chapterSceneCount: activeChapter?.sceneCount ?? null,
+      chapterReady: activeChapter?.isReady ?? false,
+    },
   };
+}
+
+export async function getPerspectiveRunContextForUser(input: {
+  userId: string;
+  chronicleId: string;
+  runId: string;
+}) {
+  const initialDb = await ensureDbLoaded();
+  const initialSnapshot = buildPerspectiveRunContextSnapshot(initialDb, input);
+  const shouldGenerateChoices =
+    isProceduralChronicle(initialDb, initialSnapshot.chronicle.id) &&
+    initialSnapshot.run.status === "active" &&
+    !initialSnapshot.beat.isTerminal &&
+    initialSnapshot.choices.length === 0;
+
+  if (!shouldGenerateChoices) {
+    return initialSnapshot;
+  }
+
+  await withDbMutation(async (db) => {
+    const { chronicle, run } = assertPerspectiveRunForUser(db, input);
+    const world = assertWorldExists(db, chronicle.worldId);
+    const version = assertVersionExists(db, chronicle.versionId);
+    const viewpoint = assertViewpointExists(db, run.viewpointId);
+    const character = db.storyCharacters.find((entry) => entry.id === viewpoint.characterId);
+    if (!character) {
+      throw new Error("Perspective character not found.");
+    }
+    const beat = assertBeatExists(db, run.currentBeatId);
+    const currentChoices = listAvailableChoicesForBeat(db, {
+      beatId: beat.id,
+      chronicleId: chronicle.id,
+      runId: run.id,
+    });
+    if (currentChoices.length > 0) {
+      return;
+    }
+
+    await ensureProceduralChoicesForBeat(db, {
+      chronicle,
+      run,
+      world,
+      version,
+      viewpoint,
+      character,
+      beat,
+    });
+  });
+
+  const refreshedDb = await ensureDbLoaded();
+  return buildPerspectiveRunContextSnapshot(refreshedDb, input);
 }
 
 export async function applyChoiceForUser(input: {
@@ -1491,10 +3113,23 @@ export async function listViewpointsForChronicle(input: {
   const db = await ensureDbLoaded();
   const chronicle = assertChronicleForUser(db, input.chronicleId, input.userId);
   const chronicleStateMap = toStateMap(groupByChronicleStates(db, chronicle.id));
+  const unlockState = getChroniclePerspectiveUnlockState(db, chronicle.id);
 
-  return db.playableViewpoints
+  const allViewpoints = db.playableViewpoints
     .filter((viewpoint) => viewpoint.versionId === chronicle.versionId && viewpoint.isPlayable)
-    .sort((a, b) => a.orderIndex - b.orderIndex)
+    .sort((a, b) => a.orderIndex - b.orderIndex);
+  const defaultRevealedViewpointId = allViewpoints[0]?.id ?? null;
+  const revealedViewpointId =
+    unlockState.primaryViewpointId ?? defaultRevealedViewpointId;
+  const visibleViewpoints = allViewpoints.filter((viewpoint) => {
+    if (unlockState.firstReadComplete) {
+      return true;
+    }
+
+    return viewpoint.id === revealedViewpointId;
+  });
+
+  return visibleViewpoints
     .map((viewpoint) => {
       const character = db.storyCharacters.find((entry) => entry.id === viewpoint.characterId);
       if (!character) return null;
@@ -1544,7 +3179,20 @@ export async function listViewpointsForChronicle(input: {
         return event.perspectiveRunId === existingRun.id;
       }).length;
 
-      return { viewpoint, character, existingRun, impactSummary, routeEventCount };
+      const revealHint =
+        unlockState.firstReadComplete || viewpoint.id === revealedViewpointId
+          ? null
+          : "Complete your first perspective run to reveal this route.";
+
+      return {
+        viewpoint,
+        character,
+        existingRun,
+        impactSummary,
+        routeEventCount,
+        revealHint,
+        firstReadComplete: unlockState.firstReadComplete,
+      };
     })
     .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry));
 }
@@ -1910,11 +3558,15 @@ export async function createBeatChoice(input: {
 
 export async function updateBeatChoice(input: {
   choiceId: string;
+  beatId: string;
   label: string;
   description?: string;
   intentTags?: string[];
   orderIndex: number;
   nextBeatId: string;
+  consequenceScope: "global" | "perspective" | "knowledge";
+  gatingRules?: ChoiceCondition[];
+  consequences: ChoiceConsequence[];
 }) {
   return withDbMutation((db) => {
     const choice = db.beatChoices.find((entry) => entry.id === input.choiceId);
@@ -1922,17 +3574,21 @@ export async function updateBeatChoice(input: {
       throw new Error("Choice not found.");
     }
 
-    const beat = assertBeatExists(db, choice.beatId);
+    const beat = assertBeatExists(db, input.beatId);
     const nextBeat = assertBeatExists(db, input.nextBeatId);
     if (nextBeat.versionId !== beat.versionId) {
       throw new Error("Next beat must belong to the same version as the source beat.");
     }
 
+    choice.beatId = beat.id;
     choice.label = input.label.trim();
     choice.description = input.description?.trim() ?? null;
     choice.intentTags = normalizeTagList(input.intentTags ?? []);
     choice.orderIndex = input.orderIndex;
     choice.nextBeatId = nextBeat.id;
+    choice.consequenceScope = input.consequenceScope;
+    choice.gatingRules = input.gatingRules ?? [];
+    choice.consequences = input.consequences;
     choice.updatedAt = nowIso();
     return choice;
   });

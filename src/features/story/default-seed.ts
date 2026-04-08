@@ -421,6 +421,7 @@ export function createDefaultStorySeed(): LocalStoryDb {
     perspectiveStateValues: [],
     perspectiveKnowledgeFlags: [],
     generatedScenes: [],
+    storyChapters: [],
     canonicalEventLog: [],
   };
 }

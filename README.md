@@ -41,6 +41,7 @@ Supported local modes:
 
 - `INKBRANCH_AI_MODE=ollama` uses local Ollama at `OLLAMA_BASE_URL`.
 - `INKBRANCH_AI_MODE=seeded` bypasses Ollama and uses deterministic seeded narration.
+- `OLLAMA_TIMEOUT_MS` should usually be `120000-180000` for chapter-length generation on local CPU.
 
 ## Local Startup
 
@@ -80,7 +81,7 @@ ollama pull gemma3
 INKBRANCH_AI_MODE=ollama
 OLLAMA_BASE_URL=http://127.0.0.1:11434/api
 OLLAMA_MODEL=gemma3
-OLLAMA_TIMEOUT_MS=45000
+OLLAMA_TIMEOUT_MS=180000
 ```
 
 If Ollama is unavailable or returns invalid payloads, Inkbranch automatically falls back to `seeded` scene generation.

@@ -195,6 +195,24 @@ export interface GeneratedSceneRecord {
   createdAt: string;
 }
 
+export interface StoryChapterRecord {
+  id: string;
+  chronicleId: string;
+  perspectiveRunId: string;
+  chapterNumber: number;
+  chapterLabel: string;
+  chapterTitle: string;
+  chapterSummary: string;
+  chapterText: string;
+  sceneCount: number;
+  wordCount: number;
+  sourceLabel: string;
+  isReady: boolean;
+  metadata: Record<string, JsonValue>;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface CanonicalEventRecord {
   id: string;
   chronicleId: string;
@@ -221,6 +239,7 @@ export interface LocalStoryDb {
   perspectiveStateValues: PerspectiveStateRecord[];
   perspectiveKnowledgeFlags: PerspectiveKnowledgeRecord[];
   generatedScenes: GeneratedSceneRecord[];
+  storyChapters: StoryChapterRecord[];
   canonicalEventLog: CanonicalEventRecord[];
 }
 
