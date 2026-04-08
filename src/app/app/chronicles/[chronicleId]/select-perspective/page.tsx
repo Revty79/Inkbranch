@@ -18,15 +18,13 @@ export default async function SelectPerspectivePage({
   return (
     <div className="space-y-4">
       <header className="space-y-2">
-        <p className="font-sans text-xs font-semibold uppercase tracking-[0.2em] text-[var(--ink-accent)]">
-          Perspective Selection
-        </p>
+        <p className="ink-label">Perspective Selection</p>
         <h1 className="font-sans text-3xl font-semibold tracking-tight text-[var(--ink-text)]">
-          Choose Your Viewpoint
+          Choose A Viewpoint Route
         </h1>
         <p className="max-w-2xl text-[var(--ink-text-muted)]">
-          Select a character route inside this Chronicle. Existing runs can be
-          resumed instead of recreated.
+          Each viewpoint enters the same Chronicle from a different life and
+          knowledge boundary. Existing runs can be resumed at any time.
         </p>
       </header>
 
@@ -41,10 +39,18 @@ export default async function SelectPerspectivePage({
             <p className="mt-2 text-sm text-[var(--ink-text-muted)]">
               {entry.viewpoint.description}
             </p>
+            {entry.impactSummary ? (
+              <div className="ink-panel mt-3 p-2.5 text-xs text-[var(--ink-text-muted)]">
+                {entry.impactSummary}
+              </div>
+            ) : null}
+            {entry.routeEventCount > 0 ? (
+              <p className="ink-pill mt-3">{entry.routeEventCount} route events logged</p>
+            ) : null}
             {entry.existingRun ? (
               <Link
                 href={`/app/chronicles/${chronicleId}/runs/${entry.existingRun.id}`}
-                className="mt-4 inline-flex rounded-full border border-[var(--ink-border)] px-3 py-1.5 font-sans text-sm font-semibold text-[var(--ink-accent)] transition hover:bg-[var(--ink-surface-muted)]"
+                className="ink-btn ink-btn-secondary mt-4"
               >
                 Resume Existing Run
               </Link>
@@ -56,10 +62,7 @@ export default async function SelectPerspectivePage({
                   name="viewpointId"
                   value={entry.viewpoint.id}
                 />
-                <button
-                  type="submit"
-                  className="rounded-full bg-[var(--ink-accent)] px-4 py-2 font-sans text-sm font-semibold text-[#fff8ef] transition hover:bg-[var(--ink-accent-soft)]"
-                >
+                <button type="submit" className="ink-btn ink-btn-primary w-full">
                   Start Perspective Run
                 </button>
               </form>

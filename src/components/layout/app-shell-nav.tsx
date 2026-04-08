@@ -30,40 +30,35 @@ export function AppShellNav({ userName, role }: AppShellNavProps) {
   const canAccessAdmin = role === "admin";
 
   return (
-    <header className="rounded-2xl border border-[var(--ink-border)] bg-[var(--ink-surface)]/95 p-3 shadow-[0_8px_24px_rgba(74,46,15,0.08)]">
+    <header className="ink-shell p-4 sm:p-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <p className="font-sans text-xs font-semibold uppercase tracking-[0.18em] text-[var(--ink-accent)]">
-            Signed-in Shell
-          </p>
+          <p className="ink-label">Signed-in Shelf</p>
+          <h1 className="mt-1 font-sans text-xl font-semibold tracking-tight text-[var(--ink-text)]">
+            Reader Workspace
+          </h1>
           <p className="mt-1 text-sm text-[var(--ink-text-muted)]">
-            {userName} · role: {role}
+            {userName} - role: {role}
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Link
-            href="/"
-            className="rounded-full border border-[var(--ink-border)] px-3 py-1.5 font-sans text-sm font-medium text-[var(--ink-text-muted)] transition hover:bg-[var(--ink-surface-muted)] hover:text-[var(--ink-text)]"
-          >
+          <Link href="/" className="ink-btn ink-btn-ghost">
             Public Site
           </Link>
           <form action="/auth/sign-out" method="post">
-            <button
-              type="submit"
-              className="rounded-full bg-[var(--ink-accent)] px-3 py-1.5 font-sans text-sm font-semibold text-[#fff8ef] transition hover:bg-[var(--ink-accent-soft)]"
-            >
+            <button type="submit" className="ink-btn ink-btn-primary">
               Sign Out
             </button>
           </form>
         </div>
       </div>
-      <nav className="mt-3 grid grid-cols-2 gap-2 sm:flex sm:flex-wrap">
+      <nav className="mt-4 grid grid-cols-2 gap-2 sm:flex sm:flex-wrap">
         {appLinks.map((link) => {
           if (link.adminOnly && !canAccessAdmin) {
             return (
               <span
                 key={link.href}
-                className="rounded-full border border-dashed border-[var(--ink-border)] px-3 py-2 text-center font-sans text-sm font-medium text-[var(--ink-text-muted)]/70"
+                className="rounded-full border border-dashed border-[var(--ink-border)] px-3 py-2 text-center font-sans text-sm font-medium text-[var(--ink-text-soft)]"
               >
                 Admin (restricted)
               </span>
@@ -79,8 +74,8 @@ export function AppShellNav({ userName, role }: AppShellNavProps) {
               className={cx(
                 "rounded-full px-3 py-2 text-center font-sans text-sm font-medium transition",
                 active
-                  ? "bg-[var(--ink-accent)] text-[#fff8ef]"
-                  : "border border-[var(--ink-border)] text-[var(--ink-text-muted)] hover:bg-[var(--ink-surface-muted)] hover:text-[var(--ink-text)]",
+                  ? "bg-[var(--ink-accent)] text-[#fff8ef] shadow-[0_8px_16px_color-mix(in_srgb,var(--ink-accent)_28%,transparent)]"
+                  : "border border-[var(--ink-border)] bg-[var(--ink-surface-strong)] text-[var(--ink-text-muted)] hover:bg-[var(--ink-surface-muted)] hover:text-[var(--ink-text)]",
               )}
             >
               {link.label}

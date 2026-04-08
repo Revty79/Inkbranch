@@ -22,6 +22,21 @@ import path from "node:path";
 
 const DATA_DIRECTORY = path.join(process.cwd(), "data");
 const DB_FILE = path.join(DATA_DIRECTORY, "inkbranch.local.json");
+const GUIDED_ACTION_TEXT_LIMIT = 180;
+
+const ACTION_TAG_HINTS: Record<string, string[]> = {
+  investigate: ["investigate", "inspect", "search", "question", "probe", "clue"],
+  calm: ["calm", "soothe", "steady", "de-escalate"],
+  signal: ["signal", "ring", "alarm", "call", "warn"],
+  secure: ["secure", "lock", "guard", "protect", "fortify"],
+  shadow: ["shadow", "tail", "follow", "track"],
+  observe: ["observe", "watch", "listen", "survey", "scan"],
+  travel: ["travel", "go", "move", "cross", "route", "head"],
+  sneak: ["sneak", "slip", "stealth", "quiet", "bypass"],
+  wait: ["wait", "hold", "pause", "linger"],
+  deliver: ["deliver", "carry", "handoff", "dispatch"],
+  protect: ["protect", "shield", "cover"],
+};
 
 let dbCache: LocalStoryDb | null = null;
 
@@ -31,6 +46,65 @@ function nowIso() {
 
 function createId(prefix: string) {
   return `${prefix}_${randomUUID()}`;
+}
+
+function readOptionalString(value: unknown) {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+function normalizeTagList(value: unknown) {
+  if (!Array.isArray(value)) {
+    return [] as string[];
+  }
+
+  const tags = value
+    .map((entry) => (typeof entry === "string" ? entry.trim().toLowerCase() : ""))
+    .filter((entry): entry is string => Boolean(entry));
+
+  return Array.from(new Set(tags));
+}
+
+function normalizeStoryBeatRecord(beat: StoryBeatRecord): StoryBeatRecord {
+  return {
+    ...beat,
+    sceneSubtitle: readOptionalString(
+      beat.sceneSubtitle ?? beat.metadata?.sceneSubtitle,
+    ),
+    chapterLabel: readOptionalString(beat.chapterLabel ?? beat.metadata?.chapterLabel),
+    atmosphere: readOptionalString(beat.atmosphere ?? beat.metadata?.atmosphere),
+    allowsGuidedAction: Boolean(
+      beat.allowsGuidedAction ?? beat.metadata?.allowsGuidedAction ?? false,
+    ),
+    guidedActionPrompt: readOptionalString(
+      beat.guidedActionPrompt ?? beat.metadata?.guidedActionPrompt,
+    ),
+    allowedActionTags: normalizeTagList(
+      beat.allowedActionTags ?? beat.metadata?.allowedActionTags,
+    ),
+    fallbackChoiceId: readOptionalString(
+      beat.fallbackChoiceId ?? beat.metadata?.fallbackChoiceId,
+    ),
+  };
+}
+
+function normalizeBeatChoiceRecord(choice: BeatChoiceRecord): BeatChoiceRecord {
+  return {
+    ...choice,
+    intentTags: normalizeTagList(choice.intentTags ?? choice.metadata?.intentTags),
+  };
+}
+
+function normalizeDbShape(db: LocalStoryDb): LocalStoryDb {
+  return {
+    ...db,
+    storyBeats: db.storyBeats.map((beat) => normalizeStoryBeatRecord(beat)),
+    beatChoices: db.beatChoices.map((choice) => normalizeBeatChoiceRecord(choice)),
+  };
 }
 
 async function readDbFile() {
@@ -54,11 +128,15 @@ async function ensureDbLoaded() {
 
   const fromDisk = await readDbFile();
   if (fromDisk) {
-    dbCache = fromDisk;
+    const normalized = normalizeDbShape(fromDisk);
+    dbCache = normalized;
+    if (JSON.stringify(fromDisk) !== JSON.stringify(normalized)) {
+      await writeDbFile(normalized);
+    }
     return structuredClone(dbCache);
   }
 
-  const seeded = createDefaultStorySeed();
+  const seeded = normalizeDbShape(createDefaultStorySeed());
   dbCache = seeded;
   await writeDbFile(seeded);
   return structuredClone(seeded);
@@ -140,6 +218,54 @@ function choiceIsAvailable(
 
     return true;
   });
+}
+
+function tokenizeGuidedAction(text: string) {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+function inferGuidedTag(inputText: string, allowedTags: string[]) {
+  const normalizedText = inputText.toLowerCase();
+  const tagsToCheck = allowedTags.length
+    ? allowedTags
+    : Object.keys(ACTION_TAG_HINTS);
+
+  for (const tag of tagsToCheck) {
+    if (normalizedText.includes(tag)) {
+      return tag;
+    }
+
+    const hints = ACTION_TAG_HINTS[tag] ?? [tag];
+    if (hints.some((hint) => normalizedText.includes(hint))) {
+      return tag;
+    }
+  }
+
+  return null;
+}
+
+function scoreGuidedChoice(inputTokens: string[], choice: BeatChoiceRecord, inferredTag: string | null) {
+  let score = 0;
+  const searchableText = `${choice.label} ${choice.description ?? ""}`.toLowerCase();
+
+  if (inferredTag && choice.intentTags.includes(inferredTag)) {
+    score += 6;
+  }
+
+  for (const token of inputTokens) {
+    if (choice.intentTags.includes(token)) {
+      score += 3;
+    }
+    if (searchableText.includes(token)) {
+      score += 1;
+    }
+  }
+
+  return score;
 }
 
 function upsertChronicleState(
@@ -257,7 +383,15 @@ function addGeneratedScene(
     viewpointLabel: string;
   },
 ) {
-  const sceneText = `${input.beat.narration}\n\nPerspective: ${input.viewpointLabel}.`;
+  const headerParts = [
+    input.beat.chapterLabel ? `${input.beat.chapterLabel}` : null,
+    input.beat.title,
+    input.beat.sceneSubtitle ? `(${input.beat.sceneSubtitle})` : null,
+  ].filter((part): part is string => Boolean(part));
+
+  const sceneText = `${headerParts.join(" - ")}\n\n${input.beat.narration}\n\nPerspective: ${
+    input.viewpointLabel
+  }.`;
 
   db.generatedScenes.push({
     id: createId("scene"),
@@ -269,6 +403,113 @@ function addGeneratedScene(
     metadata: {},
     createdAt: nowIso(),
   });
+}
+
+function listAvailableChoicesForBeat(
+  db: LocalStoryDb,
+  input: {
+    beatId: string;
+    chronicleId: string;
+    runId: string;
+  },
+) {
+  const globalState = toStateMap(groupByChronicleStates(db, input.chronicleId));
+  const perspectiveState = toStateMap(groupByPerspectiveState(db, input.runId));
+  const knowledgeState = toKnowledgeMap(groupByPerspectiveKnowledge(db, input.runId));
+
+  return db.beatChoices
+    .filter((choice) => choice.beatId === input.beatId)
+    .sort((a, b) => a.orderIndex - b.orderIndex)
+    .filter((choice) =>
+      choiceIsAvailable(choice, globalState, perspectiveState, knowledgeState),
+    );
+}
+
+function applyChoiceTransition(
+  db: LocalStoryDb,
+  input: {
+    chronicle: ChronicleRecord;
+    run: PerspectiveRunRecord;
+    viewpoint: { id: string; label: string };
+    currentBeat: StoryBeatRecord;
+    choice: BeatChoiceRecord;
+    resolutionSource: "explicit_choice" | "guided_action";
+    guidedActionText?: string;
+  },
+) {
+  for (const consequence of input.choice.consequences) {
+    if (consequence.scope === "global") {
+      upsertChronicleState(
+        db,
+        input.chronicle.id,
+        consequence.key,
+        consequence.value,
+      );
+    } else if (consequence.scope === "perspective") {
+      upsertPerspectiveState(db, input.run.id, consequence.key, consequence.value);
+    } else {
+      upsertKnowledge(db, input.run.id, consequence.key, consequence.value);
+    }
+  }
+
+  const nextBeat = input.choice.nextBeatId
+    ? db.storyBeats.find(
+        (beat) =>
+          beat.id === input.choice.nextBeatId &&
+          beat.versionId === input.chronicle.versionId,
+      )
+    : null;
+
+  if (!nextBeat) {
+    throw new Error("Choice is missing a valid next beat.");
+  }
+
+  input.run.currentBeatId = nextBeat.id;
+  input.run.lastActiveAt = nowIso();
+  if (nextBeat.isTerminal) {
+    input.run.status = "completed";
+    input.run.completedAt = nowIso();
+    input.run.summary = `Completed at scene "${nextBeat.title}".`;
+  }
+  input.chronicle.lastActiveAt = nowIso();
+
+  addCanonicalEvent(db, {
+    chronicleId: input.chronicle.id,
+    perspectiveRunId: input.run.id,
+    beatId: input.currentBeat.id,
+    choiceId: input.choice.id,
+    eventType:
+      input.choice.consequenceScope === "global"
+        ? "world_change"
+        : input.choice.consequenceScope === "knowledge"
+          ? "knowledge_reveal"
+          : "route_change",
+    summary:
+      input.resolutionSource === "guided_action"
+        ? `Guided action mapped to: ${input.choice.label}`
+        : `Choice resolved: ${input.choice.label}`,
+    payload: {
+      fromBeatId: input.currentBeat.id,
+      toBeatId: nextBeat.id,
+      resolutionSource: input.resolutionSource,
+      guidedActionText: input.guidedActionText ?? null,
+    },
+  });
+
+  addGeneratedScene(db, {
+    chronicleId: input.chronicle.id,
+    runId: input.run.id,
+    beat: nextBeat,
+    viewpointLabel: input.viewpoint.label,
+  });
+
+  return {
+    runId: input.run.id,
+    chronicleId: input.chronicle.id,
+    nextBeatId: nextBeat.id,
+    runCompleted: input.run.status === "completed",
+    nextBeat,
+  };
 }
 
 function assertWorldExists(db: LocalStoryDb, worldId: string) {
@@ -442,6 +683,10 @@ export async function listChronicleSummariesForUser(
       const version = db.storyVersions.find((entry) => entry.id === chronicle.versionId);
       if (!world || !version) return null;
 
+      const viewpointCount = db.playableViewpoints.filter(
+        (viewpoint) => viewpoint.versionId === version.id && viewpoint.isPlayable,
+      ).length;
+
       const runs = db.perspectiveRuns
         .filter((run) => run.chronicleId === chronicle.id)
         .map((run) => {
@@ -463,7 +708,25 @@ export async function listChronicleSummariesForUser(
         )
         .sort((a, b) => b.run.lastActiveAt.localeCompare(a.run.lastActiveAt));
 
-      return { chronicle, world, version, runs };
+      const completedRunCount = runs.filter(
+        (entry) => entry.run.status === "completed",
+      ).length;
+      const worldStateCount = groupByChronicleStates(db, chronicle.id).length;
+      const recentEvents = db.canonicalEventLog
+        .filter((event) => event.chronicleId === chronicle.id)
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+        .slice(0, 3);
+
+      return {
+        chronicle,
+        world,
+        version,
+        viewpointCount,
+        completedRunCount,
+        worldStateCount,
+        recentEvents,
+        runs,
+      };
     })
     .filter((entry): entry is ReaderChronicleSummary => Boolean(entry));
 }
@@ -478,9 +741,56 @@ export async function getChronicleByIdForUser(input: {
   const version = assertVersionExists(db, chronicle.versionId);
 
   const worldState = groupByChronicleStates(db, chronicle.id);
-  const runs = db.perspectiveRuns.filter((run) => run.chronicleId === chronicle.id);
+  const runs = db.perspectiveRuns
+    .filter((run) => run.chronicleId === chronicle.id)
+    .map((run) => {
+      const viewpoint = db.playableViewpoints.find(
+        (entry) => entry.id === run.viewpointId,
+      );
+      const character = viewpoint
+        ? db.storyCharacters.find((entry) => entry.id === viewpoint.characterId)
+        : null;
+      const beat = db.storyBeats.find((entry) => entry.id === run.currentBeatId);
+      if (!viewpoint || !character || !beat) return null;
 
-  return { chronicle, world, version, worldState, runs };
+      return { run, viewpoint, character, beat };
+    })
+    .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry))
+    .sort((a, b) => b.run.lastActiveAt.localeCompare(a.run.lastActiveAt));
+
+  const viewpointProgress = db.playableViewpoints
+    .filter((viewpoint) => viewpoint.versionId === chronicle.versionId && viewpoint.isPlayable)
+    .sort((a, b) => a.orderIndex - b.orderIndex)
+    .map((viewpoint) => {
+      const character = db.storyCharacters.find((entry) => entry.id === viewpoint.characterId);
+      if (!character) {
+        return null;
+      }
+
+      const existingRun = runs.find((entry) => entry.run.viewpointId === viewpoint.id);
+      return {
+        viewpoint,
+        character,
+        run: existingRun?.run ?? null,
+        beat: existingRun?.beat ?? null,
+      };
+    })
+    .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry));
+
+  const recentEvents = db.canonicalEventLog
+    .filter((event) => event.chronicleId === chronicle.id)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    .slice(0, 12);
+
+  return {
+    chronicle,
+    world,
+    version,
+    worldState,
+    runs,
+    viewpointProgress,
+    recentEvents,
+  };
 }
 
 export async function createPerspectiveRunForUser(input: {
@@ -570,20 +880,42 @@ export async function getPerspectiveRunContextForUser(input: {
   const perspectiveStateEntries = groupByPerspectiveState(db, run.id);
   const knowledgeEntries = groupByPerspectiveKnowledge(db, run.id);
 
-  const globalState = toStateMap(globalStateEntries);
-  const perspectiveState = toStateMap(perspectiveStateEntries);
-  const knowledgeState = toKnowledgeMap(knowledgeEntries);
-
-  const availableChoices = db.beatChoices
-    .filter((choice) => choice.beatId === beat.id)
-    .sort((a, b) => a.orderIndex - b.orderIndex)
-    .filter((choice) =>
-      choiceIsAvailable(choice, globalState, perspectiveState, knowledgeState),
-    );
+  const availableChoices = listAvailableChoicesForBeat(db, {
+    beatId: beat.id,
+    chronicleId: chronicle.id,
+    runId: run.id,
+  });
 
   const sceneHistory = db.generatedScenes
     .filter((scene) => scene.perspectiveRunId === run.id)
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+
+  const otherRuns = db.perspectiveRuns
+    .filter((otherRun) => otherRun.chronicleId === chronicle.id && otherRun.id !== run.id)
+    .map((otherRun) => {
+      const otherViewpoint = db.playableViewpoints.find(
+        (entry) => entry.id === otherRun.viewpointId,
+      );
+      const otherCharacter = otherViewpoint
+        ? db.storyCharacters.find((entry) => entry.id === otherViewpoint.characterId)
+        : null;
+      const otherBeat = db.storyBeats.find((entry) => entry.id === otherRun.currentBeatId);
+      if (!otherViewpoint || !otherCharacter || !otherBeat) return null;
+
+      return {
+        run: otherRun,
+        viewpoint: otherViewpoint,
+        character: otherCharacter,
+        beat: otherBeat,
+      };
+    })
+    .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry))
+    .sort((a, b) => b.run.lastActiveAt.localeCompare(a.run.lastActiveAt));
+
+  const recentChronicleEvents = db.canonicalEventLog
+    .filter((event) => event.chronicleId === chronicle.id)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    .slice(0, 8);
 
   return {
     chronicle,
@@ -598,6 +930,8 @@ export async function getPerspectiveRunContextForUser(input: {
     perspectiveStateEntries,
     knowledgeEntries,
     sceneHistory,
+    otherRuns,
+    recentChronicleEvents,
   };
 }
 
@@ -611,7 +945,7 @@ export async function applyChoiceForUser(input: {
     const { chronicle, run } = assertPerspectiveRunForUser(db, input);
     const viewpoint = assertViewpointExists(db, run.viewpointId);
     const currentBeat = assertBeatExists(db, run.currentBeatId);
-    const version = assertVersionExists(db, chronicle.versionId);
+    assertVersionExists(db, chronicle.versionId);
 
     const choice = db.beatChoices.find(
       (entry) => entry.id === input.choiceId && entry.beatId === currentBeat.id,
@@ -620,72 +954,122 @@ export async function applyChoiceForUser(input: {
       throw new Error("Choice is not valid for the current beat.");
     }
 
-    const globalState = toStateMap(groupByChronicleStates(db, chronicle.id));
-    const perspectiveState = toStateMap(groupByPerspectiveState(db, run.id));
-    const knowledgeState = toKnowledgeMap(groupByPerspectiveKnowledge(db, run.id));
-    if (!choiceIsAvailable(choice, globalState, perspectiveState, knowledgeState)) {
+    const availableChoices = listAvailableChoicesForBeat(db, {
+      beatId: currentBeat.id,
+      chronicleId: chronicle.id,
+      runId: run.id,
+    });
+    if (!availableChoices.some((entry) => entry.id === choice.id)) {
       throw new Error("Choice is currently gated by story state.");
     }
 
-    for (const consequence of choice.consequences) {
-      if (consequence.scope === "global") {
-        upsertChronicleState(db, chronicle.id, consequence.key, consequence.value);
-      } else if (consequence.scope === "perspective") {
-        upsertPerspectiveState(db, run.id, consequence.key, consequence.value);
-      } else {
-        upsertKnowledge(db, run.id, consequence.key, consequence.value);
-      }
-    }
-
-    const nextBeat = choice.nextBeatId
-      ? db.storyBeats.find(
-          (beat) => beat.id === choice.nextBeatId && beat.versionId === version.id,
-        )
-      : null;
-
-    if (!nextBeat) {
-      throw new Error("Choice is missing a valid next beat.");
-    }
-
-    run.currentBeatId = nextBeat.id;
-    run.lastActiveAt = nowIso();
-    if (nextBeat.isTerminal) {
-      run.status = "completed";
-      run.completedAt = nowIso();
-      run.summary = `Completed at beat "${nextBeat.title}".`;
-    }
-    chronicle.lastActiveAt = nowIso();
-
-    addCanonicalEvent(db, {
-      chronicleId: chronicle.id,
-      perspectiveRunId: run.id,
-      beatId: currentBeat.id,
-      choiceId: choice.id,
-      eventType:
-        choice.consequenceScope === "global"
-          ? "world_change"
-          : choice.consequenceScope === "knowledge"
-            ? "knowledge_reveal"
-            : "route_change",
-      summary: `Choice resolved: ${choice.label}`,
-      payload: {
-        fromBeatId: currentBeat.id,
-        toBeatId: nextBeat.id,
-      },
-    });
-
-    addGeneratedScene(db, {
-      chronicleId: chronicle.id,
-      runId: run.id,
-      beat: nextBeat,
-      viewpointLabel: viewpoint.label,
+    const result = applyChoiceTransition(db, {
+      chronicle,
+      run,
+      viewpoint,
+      currentBeat,
+      choice,
+      resolutionSource: "explicit_choice",
     });
 
     return {
-      runId: run.id,
+      runId: result.runId,
+      chronicleId: result.chronicleId,
+      nextBeatId: result.nextBeatId,
+      runCompleted: result.runCompleted,
+      choiceId: choice.id,
+      choiceLabel: choice.label,
+    };
+  });
+}
+
+export async function applyGuidedActionForUser(input: {
+  userId: string;
+  chronicleId: string;
+  runId: string;
+  actionText: string;
+}) {
+  return withDbMutation((db) => {
+    const { chronicle, run } = assertPerspectiveRunForUser(db, input);
+    const viewpoint = assertViewpointExists(db, run.viewpointId);
+    const currentBeat = assertBeatExists(db, run.currentBeatId);
+    assertVersionExists(db, chronicle.versionId);
+
+    if (!currentBeat.allowsGuidedAction) {
+      throw new Error("Guided actions are not enabled for this scene.");
+    }
+
+    const actionText = input.actionText.trim();
+    if (!actionText) {
+      throw new Error("Action text is required.");
+    }
+    if (actionText.length > GUIDED_ACTION_TEXT_LIMIT) {
+      throw new Error(
+        `Action text is too long. Keep it under ${GUIDED_ACTION_TEXT_LIMIT} characters.`,
+      );
+    }
+
+    const availableChoices = listAvailableChoicesForBeat(db, {
+      beatId: currentBeat.id,
       chronicleId: chronicle.id,
-      nextBeatId: nextBeat.id,
-      runCompleted: run.status === "completed",
+      runId: run.id,
+    });
+    if (!availableChoices.length) {
+      throw new Error("No actions are available for the current scene.");
+    }
+
+    const allowedTags = currentBeat.allowedActionTags;
+    const inferredTag = inferGuidedTag(actionText, allowedTags);
+    const actionTokens = tokenizeGuidedAction(actionText);
+    const scoredChoices = availableChoices
+      .map((choice) => ({
+        choice,
+        score: scoreGuidedChoice(actionTokens, choice, inferredTag),
+      }))
+      .sort((a, b) => b.score - a.score);
+
+    const fallbackChoice = currentBeat.fallbackChoiceId
+      ? availableChoices.find((choice) => choice.id === currentBeat.fallbackChoiceId) ?? null
+      : null;
+
+    const mappedChoice =
+      scoredChoices[0]?.score > 0
+        ? scoredChoices[0].choice
+        : fallbackChoice;
+
+    if (!mappedChoice) {
+      return {
+        runId: run.id,
+        chronicleId: chronicle.id,
+        runCompleted: run.status === "completed",
+        accepted: false,
+        message:
+          "That action is not currently supported in this scene. Try one of the guided action styles shown below.",
+      };
+    }
+
+    const result = applyChoiceTransition(db, {
+      chronicle,
+      run,
+      viewpoint,
+      currentBeat,
+      choice: mappedChoice,
+      resolutionSource: "guided_action",
+      guidedActionText: actionText,
+    });
+
+    return {
+      runId: result.runId,
+      chronicleId: result.chronicleId,
+      nextBeatId: result.nextBeatId,
+      runCompleted: result.runCompleted,
+      accepted: true,
+      mappedChoiceId: mappedChoice.id,
+      mappedChoiceLabel: mappedChoice.label,
+      inferredTag,
+      usedFallback: Boolean(
+        fallbackChoice && mappedChoice.id === fallbackChoice.id && scoredChoices[0]?.score <= 0,
+      ),
     };
   });
 }
@@ -696,6 +1080,7 @@ export async function listViewpointsForChronicle(input: {
 }) {
   const db = await ensureDbLoaded();
   const chronicle = assertChronicleForUser(db, input.chronicleId, input.userId);
+  const chronicleStateMap = toStateMap(groupByChronicleStates(db, chronicle.id));
 
   return db.playableViewpoints
     .filter((viewpoint) => viewpoint.versionId === chronicle.versionId && viewpoint.isPlayable)
@@ -708,7 +1093,48 @@ export async function listViewpointsForChronicle(input: {
         (run) => run.chronicleId === chronicle.id && run.viewpointId === viewpoint.id,
       );
 
-      return { viewpoint, character, existingRun };
+      const startBeat =
+        (viewpoint.startBeatId
+          ? db.storyBeats.find((beat) => beat.id === viewpoint.startBeatId)
+          : null) ??
+        db.storyBeats
+          .filter((beat) => beat.versionId === chronicle.versionId)
+          .sort((a, b) => a.orderIndex - b.orderIndex)[0];
+
+      const startingChoices = startBeat
+        ? db.beatChoices.filter((choice) => choice.beatId === startBeat.id)
+        : [];
+      const impactedChoiceCount = startingChoices.filter((choice) => {
+        const globalGateRules = choice.gatingRules.filter(
+          (rule) => rule.scope === "global",
+        );
+        if (!globalGateRules.length) {
+          return false;
+        }
+
+        return !choiceIsAvailable(
+          choice,
+          chronicleStateMap,
+          new Map(),
+          new Map(),
+        );
+      }).length;
+
+      const impactSummary =
+        impactedChoiceCount > 0
+          ? `${impactedChoiceCount} opening option${
+              impactedChoiceCount === 1 ? "" : "s"
+            } changed by Chronicle events.`
+          : chronicleStateMap.size > 0
+            ? "This route may reflect world changes already made in this Chronicle."
+            : null;
+
+      const routeEventCount = db.canonicalEventLog.filter((event) => {
+        if (event.chronicleId !== chronicle.id || !existingRun) return false;
+        return event.perspectiveRunId === existingRun.id;
+      }).length;
+
+      return { viewpoint, character, existingRun, impactSummary, routeEventCount };
     })
     .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry));
 }
@@ -949,8 +1375,15 @@ export async function createStoryBeat(input: {
   versionId: string;
   slug: string;
   title: string;
+  sceneSubtitle?: string;
+  chapterLabel?: string;
   summary: string;
   narration: string;
+  atmosphere?: string;
+  allowsGuidedAction?: boolean;
+  guidedActionPrompt?: string;
+  allowedActionTags?: string[];
+  fallbackChoiceId?: string;
   beatType: "world" | "perspective" | "interlock";
   orderIndex: number;
   isTerminal: boolean;
@@ -970,8 +1403,15 @@ export async function createStoryBeat(input: {
       versionId: input.versionId,
       slug: input.slug.trim(),
       title: input.title.trim(),
+      sceneSubtitle: readOptionalString(input.sceneSubtitle) ?? null,
+      chapterLabel: readOptionalString(input.chapterLabel) ?? null,
       summary: input.summary.trim(),
       narration: input.narration.trim(),
+      atmosphere: readOptionalString(input.atmosphere) ?? null,
+      allowsGuidedAction: Boolean(input.allowsGuidedAction),
+      guidedActionPrompt: readOptionalString(input.guidedActionPrompt) ?? null,
+      allowedActionTags: normalizeTagList(input.allowedActionTags ?? []),
+      fallbackChoiceId: readOptionalString(input.fallbackChoiceId) ?? null,
       beatType: input.beatType,
       orderIndex: input.orderIndex,
       isTerminal: input.isTerminal,
@@ -987,16 +1427,30 @@ export async function createStoryBeat(input: {
 export async function updateStoryBeat(input: {
   beatId: string;
   title: string;
+  sceneSubtitle?: string;
+  chapterLabel?: string;
   summary: string;
   narration: string;
+  atmosphere?: string;
+  allowsGuidedAction?: boolean;
+  guidedActionPrompt?: string;
+  allowedActionTags?: string[];
+  fallbackChoiceId?: string;
   orderIndex: number;
   isTerminal: boolean;
 }) {
   return withDbMutation((db) => {
     const beat = assertBeatExists(db, input.beatId);
     beat.title = input.title.trim();
+    beat.sceneSubtitle = readOptionalString(input.sceneSubtitle) ?? null;
+    beat.chapterLabel = readOptionalString(input.chapterLabel) ?? null;
     beat.summary = input.summary.trim();
     beat.narration = input.narration.trim();
+    beat.atmosphere = readOptionalString(input.atmosphere) ?? null;
+    beat.allowsGuidedAction = Boolean(input.allowsGuidedAction);
+    beat.guidedActionPrompt = readOptionalString(input.guidedActionPrompt) ?? null;
+    beat.allowedActionTags = normalizeTagList(input.allowedActionTags ?? []);
+    beat.fallbackChoiceId = readOptionalString(input.fallbackChoiceId) ?? null;
     beat.orderIndex = input.orderIndex;
     beat.isTerminal = input.isTerminal;
     beat.updatedAt = nowIso();
@@ -1008,6 +1462,7 @@ export async function createBeatChoice(input: {
   beatId: string;
   label: string;
   description?: string;
+  intentTags?: string[];
   orderIndex: number;
   nextBeatId: string;
   consequenceScope: "global" | "perspective" | "knowledge";
@@ -1029,6 +1484,7 @@ export async function createBeatChoice(input: {
       description: input.description?.trim() ?? null,
       orderIndex: input.orderIndex,
       nextBeatId: nextBeat.id,
+      intentTags: normalizeTagList(input.intentTags ?? []),
       consequenceScope: input.consequenceScope,
       gatingRules: input.gatingRules ?? [],
       consequences: input.consequences,
@@ -1046,6 +1502,7 @@ export async function updateBeatChoice(input: {
   choiceId: string;
   label: string;
   description?: string;
+  intentTags?: string[];
   orderIndex: number;
   nextBeatId: string;
 }) {
@@ -1063,6 +1520,7 @@ export async function updateBeatChoice(input: {
 
     choice.label = input.label.trim();
     choice.description = input.description?.trim() ?? null;
+    choice.intentTags = normalizeTagList(input.intentTags ?? []);
     choice.orderIndex = input.orderIndex;
     choice.nextBeatId = nextBeat.id;
     choice.updatedAt = nowIso();

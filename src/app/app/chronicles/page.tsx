@@ -10,15 +10,13 @@ export default async function ChroniclesPage() {
   return (
     <div className="space-y-4">
       <header className="space-y-2">
-        <p className="font-sans text-xs font-semibold uppercase tracking-[0.2em] text-[var(--ink-accent)]">
-          Chronicle Hub
-        </p>
+        <p className="ink-label">Chronicle Hub</p>
         <h1 className="font-sans text-3xl font-semibold tracking-tight text-[var(--ink-text)]">
-          Your Active Runs
+          Shared Story Instances
         </h1>
         <p className="max-w-2xl text-[var(--ink-text-muted)]">
-          Your active Chronicles will appear here, including each run&apos;s current
-          perspective and continuity status.
+          A Chronicle is one evolving story reality. Perspective runs are
+          different character routes inside that shared world state.
         </p>
       </header>
 
@@ -27,58 +25,90 @@ export default async function ChroniclesPage() {
           {chronicles.map((entry) => (
             <InkCard
               key={entry.chronicle.id}
-              eyebrow={entry.chronicle.status}
+              eyebrow={`${entry.chronicle.status} chronicle`}
               title={entry.world.title}
             >
-              <p className="text-sm leading-relaxed">
-                Version: {entry.version.versionLabel}
-              </p>
-              <p className="mt-1 text-sm leading-relaxed">
-                Started:{" "}
+              <div className="flex flex-wrap gap-2">
+                <span className="ink-pill">{entry.version.versionLabel}</span>
+                <span className="ink-pill">
+                  {entry.completedRunCount}/{entry.viewpointCount} perspectives
+                  completed
+                </span>
+                <span className="ink-pill">
+                  {entry.worldStateCount} world-state changes
+                </span>
+              </div>
+
+              <p className="mt-3 text-sm leading-relaxed">
+                Started{" "}
                 {new Date(entry.chronicle.startedAt).toLocaleDateString("en-US", {
                   month: "short",
                   day: "numeric",
                   year: "numeric",
                 })}
+                . Last active{" "}
+                {new Date(entry.chronicle.lastActiveAt).toLocaleDateString("en-US", {
+                  month: "short",
+                  day: "numeric",
+                })}
+                .
               </p>
-              <div className="mt-3 flex flex-wrap gap-2">
-                <Link
-                  href={`/app/chronicles/${entry.chronicle.id}`}
-                  className="rounded-full border border-[var(--ink-border)] px-3 py-1.5 font-sans text-sm font-semibold text-[var(--ink-accent)] transition hover:bg-[var(--ink-surface-muted)]"
-                >
-                  Open Chronicle
-                </Link>
-                <Link
-                  href={`/app/chronicles/${entry.chronicle.id}/select-perspective`}
-                  className="rounded-full border border-[var(--ink-border)] px-3 py-1.5 font-sans text-sm font-semibold text-[var(--ink-accent)] transition hover:bg-[var(--ink-surface-muted)]"
-                >
-                  Choose Perspective
-                </Link>
-              </div>
+
               {entry.runs.length ? (
-                <ul className="mt-4 space-y-2 text-sm text-[var(--ink-text-muted)]">
+                <ul className="mt-3 space-y-2 text-sm">
                   {entry.runs.map((runEntry) => (
-                    <li key={runEntry.run.id}>
-                      {runEntry.character.name} · {runEntry.beat.title} ·{" "}
+                    <li key={runEntry.run.id} className="ink-panel p-2.5">
+                      <p className="font-medium text-[var(--ink-text)]">
+                        {runEntry.character.name} - {runEntry.run.status}
+                      </p>
+                      <p className="mt-1 text-xs text-[var(--ink-text-muted)]">
+                        Current scene: {runEntry.beat.title}
+                      </p>
                       <Link
                         href={`/app/chronicles/${entry.chronicle.id}/runs/${runEntry.run.id}`}
-                        className="font-sans font-semibold text-[var(--ink-accent)] underline-offset-4 hover:underline"
+                        className="mt-2 inline-flex font-sans text-xs font-semibold uppercase tracking-[0.08em] text-[var(--ink-accent)] underline-offset-4 hover:underline"
                       >
-                        Resume
+                        Resume route
                       </Link>
                     </li>
                   ))}
                 </ul>
               ) : (
                 <p className="mt-3 text-sm text-[var(--ink-text-muted)]">
-                  No Perspective Runs yet for this Chronicle.
+                  No perspective runs started yet.
                 </p>
               )}
+
+              {entry.recentEvents.length ? (
+                <div className="mt-3">
+                  <p className="ink-label">Recent carryover</p>
+                  <ul className="mt-2 space-y-1 text-sm text-[var(--ink-text-muted)]">
+                    {entry.recentEvents.map((event) => (
+                      <li key={event.id}>- {event.summary}</li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+
+              <div className="mt-4 flex flex-wrap gap-2">
+                <Link
+                  href={`/app/chronicles/${entry.chronicle.id}`}
+                  className="ink-btn ink-btn-secondary"
+                >
+                  Open Chronicle
+                </Link>
+                <Link
+                  href={`/app/chronicles/${entry.chronicle.id}/select-perspective`}
+                  className="ink-btn ink-btn-ghost"
+                >
+                  Choose Perspective
+                </Link>
+              </div>
             </InkCard>
           ))}
         </div>
       ) : (
-        <div className="rounded-2xl border border-dashed border-[var(--ink-border)] bg-[var(--ink-surface)]/60 p-5 text-sm text-[var(--ink-text-muted)]">
+        <div className="ink-panel p-5 text-sm text-[var(--ink-text-muted)]">
           No Chronicles found yet. Start one from the
           <Link
             href="/app/library"

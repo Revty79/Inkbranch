@@ -8,13 +8,16 @@ Inkbranch is a web-first, mobile-first interactive fiction platform focused on:
 - Perspective Run progression
 - structured story beats and choices
 
-This repository now contains the completed Phase 01 implementation:
+This repository now contains the completed Phase 01 and Phase 02 implementation:
 
 - auth + protected app shell
 - structured story engine schema
 - Chronicle and Perspective Run domain logic
 - playable reader vertical slice
-- admin story seed tools
+- scene-first reader experience upgrades
+- Chronicle hub and cross-perspective visibility upgrades
+- guided internal creator studio routes
+- constrained guided-action foundation
 
 ## Stack
 
@@ -65,13 +68,19 @@ Public:
 Signed-in app:
 
 - `/app`
+- `/app/admin`
+- `/app/admin/worlds`
+- `/app/admin/versions`
+- `/app/admin/cast`
+- `/app/admin/canon`
+- `/app/admin/scenes`
+- `/app/admin/choices`
 - `/app/library`
 - `/app/library/[worldSlug]`
 - `/app/chronicles`
 - `/app/chronicles/[chronicleId]`
 - `/app/chronicles/[chronicleId]/select-perspective`
 - `/app/chronicles/[chronicleId]/runs/[runId]`
-- `/app/admin`
 
 ## Project Structure
 

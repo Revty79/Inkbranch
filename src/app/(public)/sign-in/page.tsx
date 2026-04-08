@@ -23,24 +23,19 @@ export default async function SignInPage({ searchParams }: SignInPageProps) {
   return (
     <div className="mx-auto w-full max-w-xl space-y-5">
       <header>
-        <p className="font-sans text-xs font-semibold uppercase tracking-[0.18em] text-[var(--ink-accent)]">
-          Account Access
-        </p>
+        <p className="ink-label">Account Access</p>
         <h1 className="mt-2 font-sans text-3xl font-semibold tracking-tight text-[var(--ink-text)]">
           Sign In To Inkbranch
         </h1>
         <p className="mt-2 text-sm text-[var(--ink-text-muted)]">
-          Use one of the internal demo identities for Phase 01 development.
+          Use one of the internal demo identities while the platform remains
+          Phase 02 internal-authored.
         </p>
       </header>
 
-      <form
-        action="/auth/sign-in"
-        method="post"
-        className="space-y-4 rounded-2xl border border-[var(--ink-border)] bg-[var(--ink-surface)] p-5 shadow-[0_12px_30px_rgba(74,46,15,0.08)]"
-      >
+      <form action="/auth/sign-in" method="post" className="ink-paper space-y-4 p-5">
         <input type="hidden" name="next" value={nextValue} />
-        <label className="block space-y-1">
+        <label className="block space-y-1.5">
           <span className="font-sans text-sm font-medium text-[var(--ink-text)]">
             Email
           </span>
@@ -48,11 +43,11 @@ export default async function SignInPage({ searchParams }: SignInPageProps) {
             required
             name="email"
             type="email"
-            className="w-full rounded-xl border border-[var(--ink-border)] bg-white px-3 py-2 text-sm outline-none ring-[var(--ink-accent)] transition focus:ring-2"
+            className="ink-field"
             placeholder="reader@inkbranch.local"
           />
         </label>
-        <label className="block space-y-1">
+        <label className="block space-y-1.5">
           <span className="font-sans text-sm font-medium text-[var(--ink-text)]">
             Password
           </span>
@@ -60,24 +55,21 @@ export default async function SignInPage({ searchParams }: SignInPageProps) {
             required
             name="password"
             type="password"
-            className="w-full rounded-xl border border-[var(--ink-border)] bg-white px-3 py-2 text-sm outline-none ring-[var(--ink-accent)] transition focus:ring-2"
-            placeholder="••••••••••••"
+            className="ink-field"
+            placeholder="************"
           />
         </label>
         {hasError ? (
-          <p className="rounded-xl border border-[#b8482b]/25 bg-[#f8d9d0] px-3 py-2 text-sm text-[#7c1f0f]">
+          <p className="ink-danger-note text-sm">
             Sign-in failed. Verify your email and password.
           </p>
         ) : null}
-        <button
-          type="submit"
-          className="w-full rounded-full bg-[var(--ink-accent)] px-4 py-2.5 font-sans text-sm font-semibold text-[#fff8ef] transition hover:bg-[var(--ink-accent-soft)]"
-        >
+        <button type="submit" className="ink-btn ink-btn-primary w-full">
           Enter The App
         </button>
       </form>
 
-      <section className="rounded-2xl border border-dashed border-[var(--ink-border)] bg-[var(--ink-surface)]/70 p-4">
+      <section className="ink-panel p-4">
         <h2 className="font-sans text-sm font-semibold text-[var(--ink-text)]">
           Demo Accounts
         </h2>

@@ -5,38 +5,48 @@ import Link from "next/link";
 
 type ChronicleDetailPageProps = {
   params: Promise<{ chronicleId: string }>;
+  searchParams: Promise<{ guided?: string }>;
 };
 
 export default async function ChronicleDetailPage({
   params,
+  searchParams,
 }: ChronicleDetailPageProps) {
   const { chronicleId } = await params;
+  const { guided } = await searchParams;
   const user = await requireAuthenticatedUser();
   const chronicleData = await loadChronicle(user.id, chronicleId);
 
-  const stateEntries = chronicleData.worldState;
+  const guidedMessage =
+    guided === "completed"
+      ? "Guided action advanced your route and completed that perspective."
+      : null;
 
   return (
     <div className="space-y-4">
       <header className="space-y-2">
-        <p className="font-sans text-xs font-semibold uppercase tracking-[0.2em] text-[var(--ink-accent)]">
-          Chronicle Detail
-        </p>
+        <p className="ink-label">Chronicle Detail</p>
         <h1 className="font-sans text-3xl font-semibold tracking-tight text-[var(--ink-text)]">
           {chronicleData.world.title}
         </h1>
         <p className="max-w-2xl text-[var(--ink-text-muted)]">
-          Version {chronicleData.version.versionLabel} · status{" "}
+          Version {chronicleData.version.versionLabel} - status{" "}
           {chronicleData.chronicle.status}
         </p>
       </header>
 
-      <div className="grid gap-4 lg:grid-cols-2">
-        <InkCard eyebrow="World State" title="Chronicle Consequences">
-          {stateEntries.length ? (
+      {guidedMessage ? (
+        <div className="ink-panel p-3 text-sm text-[var(--ink-text-muted)]">
+          {guidedMessage}
+        </div>
+      ) : null}
+
+      <div className="grid gap-4 lg:grid-cols-3">
+        <InkCard eyebrow="Shared Canon" title="Chronicle Consequences">
+          {chronicleData.worldState.length ? (
             <ul className="space-y-2 text-sm">
-              {stateEntries.map((entry) => (
-                <li key={entry.id}>
+              {chronicleData.worldState.map((entry) => (
+                <li key={entry.id} className="ink-panel p-2.5">
                   <span className="font-semibold text-[var(--ink-text)]">
                     {entry.stateKey}
                   </span>{" "}
@@ -48,32 +58,84 @@ export default async function ChronicleDetailPage({
             <p className="text-sm">No Chronicle-level state changes recorded yet.</p>
           )}
         </InkCard>
-        <InkCard eyebrow="Perspective Runs" title="Playable Routes">
-          {chronicleData.runs.length ? (
+
+        <InkCard eyebrow="Perspective Ledger" title="Route Progress">
+          <ul className="space-y-2 text-sm">
+            {chronicleData.viewpointProgress.map((entry) => (
+              <li key={entry.viewpoint.id} className="ink-panel p-2.5">
+                <p className="font-medium text-[var(--ink-text)]">
+                  {entry.character.name}
+                </p>
+                {entry.run ? (
+                  <p className="mt-1 text-xs text-[var(--ink-text-muted)]">
+                    {entry.run.status} - {entry.beat?.title ?? "unknown scene"}
+                  </p>
+                ) : (
+                  <p className="mt-1 text-xs text-[var(--ink-text-soft)]">
+                    Not started
+                  </p>
+                )}
+              </li>
+            ))}
+          </ul>
+          <Link
+            href={`/app/chronicles/${chronicleId}/select-perspective`}
+            className="ink-btn ink-btn-secondary mt-4"
+          >
+            Choose Perspective
+          </Link>
+        </InkCard>
+
+        <InkCard eyebrow="Carryover" title="Recent Chronicle Events">
+          {chronicleData.recentEvents.length ? (
             <ul className="space-y-2 text-sm">
-              {chronicleData.runs.map((run) => (
-                <li key={run.id}>
-                  <Link
-                    href={`/app/chronicles/${chronicleId}/runs/${run.id}`}
-                    className="font-sans font-semibold text-[var(--ink-accent)] underline-offset-4 hover:underline"
-                  >
-                    Open run {run.id.slice(0, 12)}...
-                  </Link>{" "}
-                  ({run.status})
+              {chronicleData.recentEvents.slice(0, 8).map((event) => (
+                <li key={event.id} className="ink-panel p-2.5">
+                  <p className="font-medium text-[var(--ink-text)]">{event.summary}</p>
+                  <p className="mt-1 text-xs text-[var(--ink-text-muted)]">
+                    {new Date(event.createdAt).toLocaleString("en-US", {
+                      month: "short",
+                      day: "numeric",
+                      hour: "numeric",
+                      minute: "2-digit",
+                    })}
+                  </p>
                 </li>
               ))}
             </ul>
           ) : (
-            <p className="text-sm">No Perspective Runs started yet.</p>
+            <p className="text-sm">No Chronicle events have been recorded yet.</p>
           )}
-          <Link
-            href={`/app/chronicles/${chronicleId}/select-perspective`}
-            className="mt-4 inline-flex rounded-full border border-[var(--ink-border)] px-3 py-1.5 font-sans text-sm font-semibold text-[var(--ink-accent)] transition hover:bg-[var(--ink-surface-muted)]"
-          >
-            Select Perspective
-          </Link>
         </InkCard>
       </div>
+
+      <section className="space-y-3">
+        <p className="ink-label">Fast Resume</p>
+        {chronicleData.runs.length ? (
+          <div className="grid gap-3 sm:grid-cols-2">
+            {chronicleData.runs.map((entry) => (
+              <div key={entry.run.id} className="ink-panel p-3">
+                <p className="font-sans text-sm font-semibold text-[var(--ink-text)]">
+                  {entry.character.name}
+                </p>
+                <p className="mt-1 text-xs text-[var(--ink-text-muted)]">
+                  {entry.run.status} - {entry.beat.title}
+                </p>
+                <Link
+                  href={`/app/chronicles/${chronicleId}/runs/${entry.run.id}`}
+                  className="ink-btn ink-btn-ghost mt-3"
+                >
+                  Resume Route
+                </Link>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="ink-panel p-4 text-sm text-[var(--ink-text-muted)]">
+            No perspective routes have started yet.
+          </div>
+        )}
+      </section>
     </div>
   );
 }

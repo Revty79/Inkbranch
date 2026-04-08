@@ -197,8 +197,15 @@ export const storyBeats = pgTable(
       .references(() => storyVersions.id, { onDelete: "cascade" }),
     slug: text("slug").notNull(),
     title: text("title").notNull(),
+    sceneSubtitle: text("scene_subtitle"),
+    chapterLabel: text("chapter_label"),
     summary: text("summary").notNull(),
     narration: text("narration").notNull(),
+    atmosphere: text("atmosphere"),
+    allowsGuidedAction: boolean("allows_guided_action").notNull().default(false),
+    guidedActionPrompt: text("guided_action_prompt"),
+    allowedActionTags: jsonb("allowed_action_tags").$type<string[]>().notNull().default([]),
+    fallbackChoiceId: text("fallback_choice_id"),
     beatType: beatTypeEnum("beat_type").notNull().default("perspective"),
     orderIndex: integer("order_index").notNull().default(0),
     isTerminal: boolean("is_terminal").notNull().default(false),
@@ -225,6 +232,7 @@ export const beatChoices = pgTable(
     description: text("description"),
     orderIndex: integer("order_index").notNull().default(0),
     nextBeatId: uuid("next_beat_id"),
+    intentTags: jsonb("intent_tags").$type<string[]>().notNull().default([]),
     consequenceScope: consequenceScopeEnum("consequence_scope")
       .notNull()
       .default("perspective"),

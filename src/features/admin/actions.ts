@@ -55,6 +55,18 @@ function parseJsonValue(raw: string): JsonValue {
   }
 }
 
+function parseCommaList(formData: FormData, key: string) {
+  const raw = formData.get(key);
+  if (typeof raw !== "string" || !raw.trim()) {
+    return [] as string[];
+  }
+
+  return raw
+    .split(",")
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean);
+}
+
 function parseOptionalConsequence(formData: FormData): ChoiceConsequence[] {
   const scope = formData.get("consequenceScope");
   const key = formData.get("consequenceKey");
@@ -114,6 +126,12 @@ function parseOptionalGate(formData: FormData): ChoiceCondition[] {
 
 function revalidateAdminSurface() {
   revalidatePath("/app/admin");
+  revalidatePath("/app/admin/worlds");
+  revalidatePath("/app/admin/versions");
+  revalidatePath("/app/admin/cast");
+  revalidatePath("/app/admin/canon");
+  revalidatePath("/app/admin/scenes");
+  revalidatePath("/app/admin/choices");
   revalidatePath("/app/library");
 }
 
@@ -239,8 +257,17 @@ export async function createBeatAction(formData: FormData) {
     versionId: readRequired(formData, "versionId"),
     slug: readRequired(formData, "slug"),
     title: readRequired(formData, "title"),
+    sceneSubtitle: String(formData.get("sceneSubtitle") ?? "").trim() || undefined,
+    chapterLabel: String(formData.get("chapterLabel") ?? "").trim() || undefined,
     summary: readRequired(formData, "summary"),
     narration: readRequired(formData, "narration"),
+    atmosphere: String(formData.get("atmosphere") ?? "").trim() || undefined,
+    allowsGuidedAction: readBoolean(formData, "allowsGuidedAction"),
+    guidedActionPrompt:
+      String(formData.get("guidedActionPrompt") ?? "").trim() || undefined,
+    allowedActionTags: parseCommaList(formData, "allowedActionTags"),
+    fallbackChoiceId:
+      String(formData.get("fallbackChoiceId") ?? "").trim() || undefined,
     beatType,
     orderIndex: readNumber(formData, "orderIndex", 100),
     isTerminal: readBoolean(formData, "isTerminal"),
@@ -254,8 +281,17 @@ export async function updateBeatAction(formData: FormData) {
   await updateStoryBeat({
     beatId: readRequired(formData, "beatId"),
     title: readRequired(formData, "title"),
+    sceneSubtitle: String(formData.get("sceneSubtitle") ?? "").trim() || undefined,
+    chapterLabel: String(formData.get("chapterLabel") ?? "").trim() || undefined,
     summary: readRequired(formData, "summary"),
     narration: readRequired(formData, "narration"),
+    atmosphere: String(formData.get("atmosphere") ?? "").trim() || undefined,
+    allowsGuidedAction: readBoolean(formData, "allowsGuidedAction"),
+    guidedActionPrompt:
+      String(formData.get("guidedActionPrompt") ?? "").trim() || undefined,
+    allowedActionTags: parseCommaList(formData, "allowedActionTags"),
+    fallbackChoiceId:
+      String(formData.get("fallbackChoiceId") ?? "").trim() || undefined,
     orderIndex: readNumber(formData, "orderIndex", 100),
     isTerminal: readBoolean(formData, "isTerminal"),
   });
@@ -278,6 +314,7 @@ export async function createChoiceAction(formData: FormData) {
     beatId: readRequired(formData, "beatId"),
     label: readRequired(formData, "label"),
     description: String(formData.get("description") ?? "").trim() || undefined,
+    intentTags: parseCommaList(formData, "intentTags"),
     orderIndex: readNumber(formData, "orderIndex", 100),
     nextBeatId: readRequired(formData, "nextBeatId"),
     consequenceScope,
@@ -294,6 +331,7 @@ export async function updateChoiceAction(formData: FormData) {
     choiceId: readRequired(formData, "choiceId"),
     label: readRequired(formData, "label"),
     description: String(formData.get("description") ?? "").trim() || undefined,
+    intentTags: parseCommaList(formData, "intentTags"),
     orderIndex: readNumber(formData, "orderIndex", 100),
     nextBeatId: readRequired(formData, "nextBeatId"),
   });

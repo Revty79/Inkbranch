@@ -20,29 +20,21 @@ export default async function StoryDetailPage({ params }: StoryDetailPageProps) 
   return (
     <div className="space-y-4">
       <header className="space-y-2">
-        <p className="font-sans text-xs font-semibold uppercase tracking-[0.2em] text-[var(--ink-accent)]">
-          Story Start
-        </p>
+        <p className="ink-label">Story Start</p>
         <h1 className="font-sans text-3xl font-semibold tracking-tight text-[var(--ink-text)]">
           {world.title}
         </h1>
-        <p className="max-w-2xl text-[var(--ink-text-muted)]">
-          {world.synopsis}
-        </p>
+        <p className="max-w-2xl text-[var(--ink-text-muted)]">{world.synopsis}</p>
       </header>
 
       <div className="grid gap-4 lg:grid-cols-3">
         <InkCard eyebrow={world.tone} title={`Version: ${version.versionLabel}`}>
-          <p className="text-sm leading-relaxed">
-            {version.description}
-          </p>
+          <p className="text-sm leading-relaxed">{version.description}</p>
+          <p className="ink-pill mt-3">Published story cut</p>
           <form action={startChronicleAction} className="mt-4">
             <input type="hidden" name="versionId" value={version.id} />
             <input type="hidden" name="worldSlug" value={world.slug} />
-            <button
-              type="submit"
-              className="rounded-full bg-[var(--ink-accent)] px-4 py-2 font-sans text-sm font-semibold text-[#fff8ef] transition hover:bg-[var(--ink-accent-soft)]"
-            >
+            <button type="submit" className="ink-btn ink-btn-primary w-full">
               Start Chronicle
             </button>
           </form>
@@ -61,7 +53,7 @@ export default async function StoryDetailPage({ params }: StoryDetailPageProps) 
         ))}
       </div>
 
-      <div className="rounded-2xl border border-dashed border-[var(--ink-border)] bg-[var(--ink-surface)]/70 p-4 text-sm text-[var(--ink-text-muted)]">
+      <div className="ink-panel p-4 text-sm text-[var(--ink-text-muted)]">
         Returning reader? Resume from your Chronicle list.
         <Link
           href="/app/chronicles"

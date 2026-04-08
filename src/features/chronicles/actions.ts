@@ -1,6 +1,7 @@
 "use server";
 
 import {
+  applyGuidedActionForUser,
   applyChoiceForUser,
   createChronicleForUser,
   createPerspectiveRunForUser,
@@ -68,4 +69,32 @@ export async function chooseBeatChoiceAction(formData: FormData) {
   }
 
   redirect(`/app/chronicles/${chronicleId}/runs/${runId}`);
+}
+
+export async function chooseGuidedActionAction(formData: FormData) {
+  const user = await requireAuthenticatedUser();
+  const chronicleId = mustBeString(formData.get("chronicleId"), "chronicleId");
+  const runId = mustBeString(formData.get("runId"), "runId");
+  const actionText = mustBeString(formData.get("actionText"), "actionText");
+
+  const result = await applyGuidedActionForUser({
+    userId: user.id,
+    chronicleId,
+    runId,
+    actionText,
+  });
+
+  revalidatePath(`/app/chronicles/${chronicleId}/runs/${runId}`);
+  revalidatePath("/app/chronicles");
+
+  if (!result.accepted) {
+    redirect(`/app/chronicles/${chronicleId}/runs/${runId}?guided=unsupported`);
+  }
+
+  if (result.runCompleted) {
+    redirect(`/app/chronicles/${chronicleId}?guided=completed`);
+  }
+
+  const guidedStatus = result.usedFallback ? "fallback" : "resolved";
+  redirect(`/app/chronicles/${chronicleId}/runs/${runId}?guided=${guidedStatus}`);
 }

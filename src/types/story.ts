@@ -88,8 +88,15 @@ export interface StoryBeatRecord {
   versionId: string;
   slug: string;
   title: string;
+  sceneSubtitle: string | null;
+  chapterLabel: string | null;
   summary: string;
   narration: string;
+  atmosphere: string | null;
+  allowsGuidedAction: boolean;
+  guidedActionPrompt: string | null;
+  allowedActionTags: string[];
+  fallbackChoiceId: string | null;
   beatType: BeatType;
   orderIndex: number;
   isTerminal: boolean;
@@ -120,6 +127,7 @@ export interface BeatChoiceRecord {
   description: string | null;
   orderIndex: number;
   nextBeatId: string | null;
+  intentTags: string[];
   consequenceScope: ConsequenceScope;
   gatingRules: ChoiceCondition[];
   consequences: ChoiceConsequence[];
@@ -232,6 +240,10 @@ export interface ReaderChronicleSummary {
   chronicle: ChronicleRecord;
   world: StoryWorldRecord;
   version: StoryVersionRecord;
+  viewpointCount: number;
+  completedRunCount: number;
+  worldStateCount: number;
+  recentEvents: CanonicalEventRecord[];
   runs: Array<{
     run: PerspectiveRunRecord;
     viewpoint: PlayableViewpointRecord;

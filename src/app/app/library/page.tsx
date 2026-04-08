@@ -8,15 +8,13 @@ export default async function AppLibraryPage() {
   return (
     <div className="space-y-4">
       <header className="space-y-2">
-        <p className="font-sans text-xs font-semibold uppercase tracking-[0.2em] text-[var(--ink-accent)]">
-          Reader Library
-        </p>
+        <p className="ink-label">Reader Library</p>
         <h1 className="font-sans text-3xl font-semibold tracking-tight text-[var(--ink-text)]">
           Choose A Story World
         </h1>
         <p className="max-w-2xl text-[var(--ink-text-muted)]">
-          Story detail routes are scaffolded for Chronicle creation and
-          perspective selection in later prompts.
+          Every world has at least one published version and one or more
+          playable perspectives. Opening a world prepares a new Chronicle.
         </p>
       </header>
 
@@ -29,20 +27,20 @@ export default async function AppLibraryPage() {
               title={entry.world.title}
             >
               <p className="text-sm leading-relaxed">{entry.world.synopsis}</p>
-              <p className="mt-3 font-sans text-xs uppercase tracking-[0.16em] text-[var(--ink-accent)]">
+              <p className="ink-pill mt-3">
                 {entry.playablePerspectiveCount} playable perspectives
               </p>
               <Link
                 href={`/app/library/${entry.world.slug}`}
-                className="mt-4 inline-flex rounded-full border border-[var(--ink-border)] px-3 py-1.5 font-sans text-sm font-semibold text-[var(--ink-accent)] transition hover:bg-[var(--ink-surface-muted)]"
+                className="ink-btn ink-btn-secondary mt-4"
               >
-                Open world
+                Open World
               </Link>
             </InkCard>
           ))}
         </div>
       ) : (
-        <div className="rounded-2xl border border-dashed border-[var(--ink-border)] bg-[var(--ink-surface)]/60 p-5 text-sm text-[var(--ink-text-muted)]">
+        <div className="ink-panel p-5 text-sm text-[var(--ink-text-muted)]">
           No published worlds are available yet. Admin can publish a story
           version from `/app/admin`.
         </div>

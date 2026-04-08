@@ -8,15 +8,13 @@ export default async function PublicLibraryPage() {
   return (
     <div className="space-y-5">
       <header>
-        <p className="font-sans text-xs font-semibold uppercase tracking-[0.2em] text-[var(--ink-accent)]">
-          Story Library
-        </p>
+        <p className="ink-label">Story Library</p>
         <h1 className="mt-2 font-sans text-3xl font-semibold tracking-tight text-[var(--ink-text)]">
           Published Worlds
         </h1>
         <p className="mt-2 max-w-2xl text-[var(--ink-text-muted)]">
-          Preview the worlds available in Inkbranch. Sign-in flows and Chronicle
-          creation are scaffolded in the app shell.
+          Preview the worlds currently available in Inkbranch. Sign in to create
+          a Chronicle and play from any perspective route.
         </p>
       </header>
 
@@ -28,14 +26,14 @@ export default async function PublicLibraryPage() {
             title={entry.world.title}
           >
             <p className="text-sm leading-relaxed">{entry.world.synopsis}</p>
-            <p className="mt-3 font-sans text-xs uppercase tracking-[0.16em] text-[var(--ink-accent)]">
+            <p className="ink-pill mt-3">
               {entry.playablePerspectiveCount} playable perspectives
             </p>
           </InkCard>
         ))}
       </div>
 
-      <div className="rounded-2xl border border-dashed border-[var(--ink-border)] bg-[var(--ink-surface)]/70 p-4 text-sm text-[var(--ink-text-muted)]">
+      <div className="ink-panel p-4 text-sm text-[var(--ink-text-muted)]">
         Ready to begin a Chronicle? Continue into the signed-in app shell.
         <Link
           href="/app/library"
