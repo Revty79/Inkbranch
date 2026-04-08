@@ -36,7 +36,7 @@ async function main() {
   const seedSlug = "minimum-chronicle";
   const admin = await listAdminStoryData();
 
-  let world =
+  const world =
     admin.storyWorlds.find((entry) => entry.slug === seedSlug) ??
     (await createStoryWorld({
       slug: seedSlug,
@@ -47,7 +47,7 @@ async function main() {
       isFeatured: true,
     }));
 
-  let version =
+  const version =
     admin.storyVersions.find(
       (entry) => entry.worldId === world.id && entry.status === "published",
     ) ??
@@ -59,7 +59,7 @@ async function main() {
       isDefaultPublished: true,
     }));
 
-  let character =
+  const character =
     admin.storyCharacters.find(
       (entry) => entry.worldId === world.id && entry.slug === "tester-protagonist",
     ) ??
@@ -71,7 +71,7 @@ async function main() {
         "A practical investigator who notices social pressure shifts before anyone else.",
     }));
 
-  let openingBeat =
+  const openingBeat =
     admin.storyBeats.find(
       (entry) => entry.versionId === version.id && entry.slug === "min-opening",
     ) ??
@@ -95,7 +95,7 @@ async function main() {
       isTerminal: false,
     }));
 
-  let investigateBeat =
+  const investigateBeat =
     admin.storyBeats.find(
       (entry) => entry.versionId === version.id && entry.slug === "min-investigate",
     ) ??
@@ -118,7 +118,7 @@ async function main() {
       isTerminal: false,
     }));
 
-  let stabilizeBeat =
+  const stabilizeBeat =
     admin.storyBeats.find(
       (entry) => entry.versionId === version.id && entry.slug === "min-stabilize",
     ) ??
@@ -141,7 +141,7 @@ async function main() {
       isTerminal: false,
     }));
 
-  let viewpoint =
+  const viewpoint =
     admin.playableViewpoints.find(
       (entry) =>
         entry.versionId === version.id &&
